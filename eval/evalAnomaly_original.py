@@ -3,7 +3,6 @@ import os
 import cv2
 import glob
 import torch
-import torch.nn.functional as F
 import random
 from PIL import Image
 import numpy as np
@@ -62,9 +61,6 @@ def main():
     parser.add_argument('--cpu', action='store_true')
     args = parser.parse_args()
     anomaly_score_list = []
-    msp_list = []
-    maxLogit_list = []
-    entropy_list = []
     ood_gts_list = []
 
     # if results.txt does not exist, create it
@@ -104,21 +100,8 @@ def main():
         images = input_transform((Image.open(path).convert('RGB'))).unsqueeze(0).float().cuda()  # transofrm + add batch dimension + to GPU
         images = images.permute(0,3,1,2) # change to NCHW if needed (1, 3, 512, 1024)
         with torch.no_grad():
-            logits = model(images)  # forward pass
-        
-        # -- COMPUTATION 1 : MSP ( Maximum Softmax Probability ) --
-        softmax = F.softmax(logits, dim=1)
-        msp_score = 1 - np.max(softmax.squeeze(0).data.cpu().numpy(), axis=0)   # 1 - prob of most probable class
-        
-        # -- COMPUTATION 2 : MaxLogit --
-        # if the max logit is low, the anomaly score should be high
-        maxLogit_score = - np.max(logits.squeeze(0).data.cpu().numpy(), axis=0)
-        
-        # -- COMPUTATION 3 : Entropy --
-        prob_cpu = softmax.squeeze(0).data.cpu().numpy()
-        entropy_score = - np.sum(prob_cpu * np.log(prob_cpu + 1e-8), axis=0)  # entropy formula
-        
-        #! Management of ground truth
+            result = model(images)  # forward pass
+        anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)       
         pathGT = path.replace("images", "labels_masks")  # get ground truth path (path/to/images/img.png -> path/to/labels_masks/img.png)     
         if "RoadObsticle21" in pathGT:
            pathGT = pathGT.replace("webp", "png")
@@ -146,43 +129,40 @@ def main():
         if 1 not in np.unique(ood_gts):  # skip images without OOD pixels
             continue              
         else:
-            ood_gts_list.append(ood_gts)   # add ground truth mask to list
-            msp_list.append(msp_score)
-            maxLogit_list.append(maxLogit_score)
-            entropy_list.append(entropy_score)
-        del logits, softmax, msp_score, maxLogit_score, entropy_score, ood_gts, mask   # free some memory
+             ood_gts_list.append(ood_gts)   # add ground truth mask to list
+             anomaly_score_list.append(anomaly_result)  # add anomaly score map to list
+        del result, anomaly_result, ood_gts, mask   # free some memory
         torch.cuda.empty_cache()
 
     file.write( "\n")
+
+    # concatenate all arrays in big numpy arrays
+    ood_gts = np.array(ood_gts_list)
+    anomaly_scores = np.array(anomaly_score_list)
+
+    # create masks for OOD and IND pixels
+    ood_mask = (ood_gts == 1)   # true for OOD pixels
+    ind_mask = (ood_gts == 0)   # true for IND pixels
+
+    # get anomaly scores for OOD and IND pixels
+    ood_out = anomaly_scores[ood_mask]
+    ind_out = anomaly_scores[ind_mask]
+
+    # create labels for OOD and IND pixels
+    ood_label = np.ones(len(ood_out))   # ood_label contains number of ones equal to number of OOD pixels
+    ind_label = np.zeros(len(ind_out))  # ind_label contains number of zeros equal to number of IND pixels
     
-    
-    #!-- FUNCTION TO EVALUATE METRICS FOR A GIVEN METHOD --
-    def evaluate_metric(score_list, gt_list, method_name):
-        ood_gts = np.array(gt_list)
-        anomaly_scores = np.array(score_list)
+    # concatenate OOD and IND outputs and labels
+    val_out = np.concatenate((ind_out, ood_out))        # val_out = [0.1, 0.4, 0.35, 0.8]
+    val_label = np.concatenate((ind_label, ood_label))  # val_label = [0, 0, 1, 1]
 
-        ood_mask = (ood_gts == 1)
-        ind_mask = (ood_gts == 0)
+    prc_auc = average_precision_score(val_label, val_out)   # how 
+    fpr = fpr_at_95_tpr(val_out, val_label)
 
-        ood_out = anomaly_scores[ood_mask]
-        ind_out = anomaly_scores[ind_mask]
+    print(f'AUPRC score: {prc_auc*100.0}')
+    print(f'FPR@TPR95: {fpr*100.0}')
 
-        ood_label = np.ones(len(ood_out))
-        ind_label = np.zeros(len(ind_out))
-        
-        val_out = np.concatenate((ind_out, ood_out))
-        val_label = np.concatenate((ind_label, ood_label))
-
-        prc_auc = average_precision_score(val_label, val_out)
-        fpr = fpr_at_95_tpr(val_out, val_label)
-
-        print(f'[{method_name}] AUPRC: {prc_auc*100.0:.2f} | FPR@95: {fpr*100.0:.2f}')
-        file.write(f'[{method_name}] AUPRC: {prc_auc*100.0:.2f}   FPR@95: {fpr*100.0:.2f}\n')
-    
-    # FINAL EVALUATION FOR ALL METHODS
-    evaluate_metric(msp_list, ood_gts_list, "MSP")
-    evaluate_metric(maxLogit_list, ood_gts_list, "MaxLogit")
-    evaluate_metric(entropy_list, ood_gts_list, "Entropy")
+    file.write(('    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
     file.close()
 
 if __name__ == '__main__':
