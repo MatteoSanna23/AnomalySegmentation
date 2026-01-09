@@ -99,10 +99,11 @@ def main():
     print ("Model and weights LOADED successfully")
     model.eval()
     
+    #! -- LOOP THROUGH IMAGES --
     for path in glob.glob(os.path.expanduser(str(args.input[0]))):
-        print(path)
+        filename = os.path.splitext(os.path.basename(path))[0]
+        print(filename, end=' - ', flush=True)
         images = input_transform((Image.open(path).convert('RGB'))).unsqueeze(0).float().cuda()  # transofrm + add batch dimension + to GPU
-        images = images.permute(0,3,1,2) # change to NCHW if needed (1, 3, 512, 1024)
         with torch.no_grad():
             logits = model(images)  # forward pass
         
@@ -154,10 +155,17 @@ def main():
         torch.cuda.empty_cache()
 
     file.write( "\n")
+    print("\n")
     
     
     #!-- FUNCTION TO EVALUATE METRICS FOR A GIVEN METHOD --
     def evaluate_metric(score_list, gt_list, method_name):
+        # security check
+        if len(score_list) == 0 or len(gt_list) == 0:
+            print(f'No data to evaluate for {method_name}.')
+            file.write(f'No data to evaluate for {method_name}.\n')
+            return
+        
         ood_gts = np.array(gt_list)
         anomaly_scores = np.array(score_list)
 
@@ -176,7 +184,7 @@ def main():
         prc_auc = average_precision_score(val_label, val_out)
         fpr = fpr_at_95_tpr(val_out, val_label)
 
-        print(f'[{method_name}] AUPRC: {prc_auc*100.0:.2f} | FPR@95: {fpr*100.0:.2f}')
+        print(f'\n[{method_name}] AUPRC: {prc_auc*100.0:.2f} | FPR@95: {fpr*100.0:.2f}')
         file.write(f'[{method_name}] AUPRC: {prc_auc*100.0:.2f}   FPR@95: {fpr*100.0:.2f}\n')
     
     # FINAL EVALUATION FOR ALL METHODS
