@@ -10,14 +10,77 @@ import numpy as np
 import os.path as osp
 from argparse import ArgumentParser
 import sys
+import math
+
+#--------------------------------------------------------------------------------
+def resize_pos_embed(state_dict, model, target_img_size=(512, 1024)):
+    """
+    Adatta i positional embeddings dal checkpoint alla risoluzione attuale.
+    """
+    # 1. Gestione Positional Embeddings
+    if 'encoder.backbone.pos_embed' in state_dict:
+        pos_embed_checkpoint = state_dict['encoder.backbone.pos_embed'] # [1, N_chk, C]
+        embedding_dim = pos_embed_checkpoint.shape[-1]
+        num_patches_checkpoint = pos_embed_checkpoint.shape[1]
+        
+        # Calcola la griglia del checkpoint (es. 4096 -> 64x64)
+        grid_size_chk = int(math.sqrt(num_patches_checkpoint))
+        
+        # Prepara il tensore per l'interpolazione: [1, C, H, W]
+        # Nota: assumiamo patch quadrati. Se grid_size_chk^2 != num_patches, la logica cambia,
+        # ma per ViT standard (es. 4096) è 64x64.
+        pos_embed_reshaped = pos_embed_checkpoint.transpose(1, 2).reshape(1, embedding_dim, grid_size_chk, grid_size_chk)
+        
+        # Calcola nuova griglia target (es. 512x1024 con patch 16 -> 32x64)
+        patch_size = 16 
+        new_h, new_w = target_img_size[0] // patch_size, target_img_size[1] // patch_size
+        
+        print(f"Resizing pos_embed from {grid_size_chk}x{grid_size_chk} to {new_h}x{new_w}")
+        
+        new_pos_embed = F.interpolate(
+            pos_embed_reshaped, size=(new_h, new_w), mode='bicubic', align_corners=False
+        )
+        
+        # Riporta alla forma [1, N_new, C]
+        new_pos_embed = new_pos_embed.flatten(2).transpose(1, 2)
+        state_dict['encoder.backbone.pos_embed'] = new_pos_embed
+
+    # 2. Gestione attn_mask_probs (3 livelli vs 4 livelli)
+    # Se il checkpoint ha 3 pesi e il modello ne aspetta 4, probabilmente
+    # dobbiamo adattare il modello o "falsificare" il caricamento. 
+    # Qui proviamo ad adattare il tensore del checkpoint facendo padding (o interpolazione),
+    # ma la soluzione ideale sarebbe configurare EoMT per usare 3 livelli.
+    if 'attn_mask_probs' in state_dict:
+        amp = state_dict['attn_mask_probs']
+        if amp.shape[0] != model.attn_mask_probs.shape[0]:
+            print(f"Adattamento attn_mask_probs da {amp.shape} a {model.attn_mask_probs.shape}")
+            # Se ne mancano, facciamo resize (brutale ma permette il caricamento)
+            # Soluzione alternativa: Se puoi, modifica EoMT(..., num_feature_levels=3)
+            new_amp = F.interpolate(amp.view(1, 1, -1), size=model.attn_mask_probs.shape[0], mode='linear', align_corners=False)
+            state_dict['attn_mask_probs'] = new_amp.view(-1)
+            
+    return state_dict
 
 # in this case we have to exit from eval folder and go to eomt/models
-sys.path.append(osp.abspath(osp.join(osp.dirname(__file__), '..')))
-from eomt.models.eomt import EoMT 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+eomt_package_dir = os.path.join(project_root, 'eomt')
+
+# 4. Aggiungi entrambi i percorsi a sys.path
+if project_root not in sys.path:
+    sys.path.append(project_root)
+if eomt_package_dir not in sys.path:
+    sys.path.append(eomt_package_dir)
+    
+#--------------------------------------------------------------------------------
+
+from models.eomt import EoMT
 
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr, plot_barcode
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+
+from models.vit import ViT
 
 seed = 42
 
@@ -112,7 +175,9 @@ def main():
 
     # Model Initialization
     # Note: Ensure parameters (e.g., backbone) match those used in training
-    model = EoMT(num_classes=NUM_CLASSES) 
+    encoder = ViT(img_size=(512, 1024), patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4) 
+    num_queries = 100
+    model = EoMT(encoder=encoder, num_q=num_queries, num_classes=NUM_CLASSES)
     
     if not args.cpu:
         model = model.cuda()
@@ -132,9 +197,10 @@ def main():
         if name.startswith("network."):
             name = name.replace("network.", "")
         new_state_dict[name] = v
-        
-    model.load_state_dict(new_state_dict, strict=False)
-    print("Model loaded successfully")
+      
+    new_state_dict = resize_pos_embed(new_state_dict, model, target_img_size=(512, 1024))    
+    msg = model.load_state_dict(new_state_dict, strict=False)
+    print(f"Weights loaded. Missing keys: {msg.missing_keys}, Unexpected keys: {msg.unexpected_keys}")
     model.eval()
     
     #! -- LOOP THROUGH IMAGES --
