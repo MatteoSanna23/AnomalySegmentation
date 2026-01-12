@@ -176,7 +176,7 @@ def main():
     print(f"Loading EoMT model weights from: {args.loadWeights}")
 
     # Model Initialization
-    encoder = ViT(img_size=(512, 1024), patch_size=16, backbone_name="vit_large_patch14_reg4_dinov2")
+    encoder = ViT(img_size=(512, 1024), patch_size=16, backbone_name="vit_base_patch14_reg4_dinov2")
     num_queries = 100
     model = EoMT(encoder=encoder, num_q=num_queries, num_classes=NUM_CLASSES)
     
