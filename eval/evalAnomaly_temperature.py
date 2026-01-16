@@ -158,66 +158,64 @@ def main():
     parser.add_argument('--cpu', action='store_true')
     args = parser.parse_args()
     
-    # Lists
-    msp_list = []
-    maxLogit_list = []
-    entropy_list = []
-    rba_list = [] 
+    #! --- TEMPRERATURE CONFIG ---
+    # These are the temperatures requested by the table + a range to find the "Best T"
+    # T=1.0 is the default (no scaling)
+    target_temps = [0.5, 0.75, 1.0, 1.1]
+    # target_temps = [0.1, 0.3, 0.5, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 2.0]
+    
+    # Dictionary to store lists of scores for each temperature
+    # keys: 0.5, 0.75, 1.0, 1.1
+    msp_results = {t: [] for t in target_temps}
+    
     ood_gts_list = []
 
-    if not os.path.exists('results_eomt.txt'):
-        open('results_eomt.txt', 'w').close()
-    file = open('results_eomt.txt', 'a')
+    if not os.path.exists('results_eomt_temp.txt'):
+        open('results_eomt_temp.txt', 'w').close()
+    file = open('results_eomt_temp.txt', 'a')
     
-    # Validate weights path early with a helpful message
+    # Loading weights and model, like previously
     if not os.path.isfile(args.loadWeights):
         print(f"Weights file not found: {args.loadWeights}")
         sys.exit(1)
 
     print(f"Loading EoMT model weights from: {args.loadWeights}")
 
-    # Model Initialization
     encoder = ViT(img_size=(512, 1024), patch_size=16, backbone_name="vit_base_patch14_reg4_dinov2")
-    #? encoder = ViT(img_size=(512, 1024), patch_size=16, backbone_name='vit_base_patch16_224')
     num_queries = 100
     model = EoMT(encoder=encoder, num_q=num_queries, num_classes=NUM_CLASSES)
     
     if not args.cpu:
         model = model.cuda()
 
-    # Load Custom Weights
+    # Load Custom Weights 
     checkpoint = torch.load(args.loadWeights, map_location='cpu')
     state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
-    
-    # Clean checkpoint keys (module./model./network.)
     new_state_dict = {}
     for k, v in state_dict.items():
         name = k
-        if name.startswith("module."):
-            name = name.replace("module.", "")
-        if name.startswith("model."):
-            name = name.replace("model.", "")
-        if name.startswith("network."):
-            name = name.replace("network.", "")
+        if name.startswith("module."): name = name.replace("module.", "")
+        if name.startswith("model."): name = name.replace("model.", "")
+        if name.startswith("network."): name = name.replace("network.", "")
         new_state_dict[name] = v
       
-    # Resize positional embeddings and attn_mask_probs if needed, with resizing function
     new_state_dict = resize_pos_embed(new_state_dict, model, target_img_size=(512, 1024))   
-    msg = model.load_state_dict(new_state_dict, strict=False)
-    print(f"Weights loaded. Missing keys: {msg.missing_keys}, Unexpected keys: {msg.unexpected_keys}")
+    model.load_state_dict(new_state_dict, strict=False)
     model.eval()
     
-    #! -- LOOP THROUGH IMAGES --
-    # Handle input list or glob pattern
+    # --- LOOP THROUGH IMAGES ---
     input_files = []
-    for pattern in args.input:  # if multiple patterns are given...
+    for pattern in args.input:
         input_files.extend(glob.glob(os.path.expanduser(pattern)))
         
-    for path in input_files:    # for each image path
-        filename = os.path.splitext(os.path.basename(path))[0]
-        print(filename, end=' - ', flush=True)
+    print(f"Inizio inferenza su {len(input_files)} immagini con temperature: {target_temps}")
+
+    for i, path in enumerate(input_files):
+        # Visual progress every 10 images
+        if i % 10 == 0:
+            print(f"Processing {i}/{len(input_files)}: {os.path.basename(path)}")
         
-        # Prepare Input (apply transforms to get a (1, 3, H, W) tensor)
+        # Prepare Input
         pil_img = Image.open(path).convert('RGB')
         images = input_transform(pil_img).unsqueeze(0)
         
@@ -228,53 +226,51 @@ def main():
             # EoMT Forward
             outputs = model(images)
             if isinstance(outputs, (tuple, list)):
-                # Take the last level outputs
-                # outputs[0]: pred_masks, outputs[1]: pred_logits
                 pred_masks = outputs[0][-1]  
                 pred_logits = outputs[1][-1]
             elif isinstance(outputs, dict):
                 pred_masks = outputs['pred_masks']
                 pred_logits = outputs['pred_logits']
-            else:
-                raise TypeError(f"Formato output inatteso: {type(outputs)}")
             
-            # Upsample masks to evaluation resolution (512x1024)
+            # Upsample masks
             pred_masks = F.interpolate(pred_masks, size=(512, 1024), mode='bilinear', align_corners=False)
             
             # Obtain pixel-wise maps
-            sem_probs, pixel_logits = get_pixel_scores(pred_logits, pred_masks)
+            # we need pixel_logits for temperature scaling
+            # Shape: (1, 19, 512, 1024)
+            _, pixel_logits = get_pixel_scores(pred_logits, pred_masks)
             
-            # Convert to numpy (remove batch dim) beacause we have batch size 1
-            sem_probs_np = sem_probs.squeeze(0).cpu().numpy() # (19, 512, 1024)
-            pixel_logits_np = pixel_logits.squeeze(0).cpu().numpy() # (19, 512, 1024)
+            #! --- COMPUTING TEMPERATURE SCALING ---
+            # We do it here because pixel_logits is heavy to keep all in RAM
+            
+            for t in target_temps:
+                # 1. Scale logits
+                scaled_logits = pixel_logits / t
+                
+                # 2. Calculate softmax on scaled logits
+                # Note: pixel_logits is (B, C, H, W). Softmax on dim=1 (channels/classes)
+                scaled_probs = F.softmax(scaled_logits, dim=1)
+                
+                # 3. Convert to numpy
+                scaled_probs_np = scaled_probs.squeeze(0).cpu().numpy() # (19, 512, 1024)
+                
+                # 4. Calculate MSP: 1 - max(probs)
+                msp_score_t = 1 - np.max(scaled_probs_np, axis=0)
+                
+                # Save in the corresponding list
+                msp_results[t].append(msp_score_t)
 
-            # -- COMPUTATION 1 : MSP --
-            msp_score = 1 - np.max(sem_probs_np, axis=0)    # 1 - max(Known Class Probabilities)
-            
-            # -- COMPUTATION 2 : MaxLogit --
-            maxLogit_score = - np.max(pixel_logits_np, axis=0)  # - max(Known Class Logits)
-            
-            # -- COMPUTATION 3 : Entropy --
-            entropy_score = - np.sum(sem_probs_np * np.log(sem_probs_np + 1e-8), axis=0)
-            
-            # -- COMPUTATION 4 : RbA (Rejected by All) --
-            # If all class probabilities are low, sum will be low, and RbA will be high.
-            rba_score = 1 - np.sum(sem_probs_np, axis=0)    # RbA = 1 - Sum(Probabilities of Known Classes)
-        
-        #! Management of ground truth (Same as evalAnomaly.py)
+        # Ground Truth Handling, same as before
         pathGT = path.replace("images", "labels_masks")     
-        if "RoadObsticle21" in pathGT:
-           pathGT = pathGT.replace("webp", "png")
-        if "fs_static" in pathGT:
-           pathGT = pathGT.replace("jpg", "png")                
-        if "RoadAnomaly" in pathGT:
-           pathGT = pathGT.replace("jpg", "png")  
+        if "RoadObsticle21" in pathGT: pathGT = pathGT.replace("webp", "png")
+        if "fs_static" in pathGT: pathGT = pathGT.replace("jpg", "png")                
+        if "RoadAnomaly" in pathGT: pathGT = pathGT.replace("jpg", "png")  
 
         mask = Image.open(pathGT)
         mask = target_transform(mask)
         ood_gts = np.array(mask)
 
-        # Mapping specific dataset labels to binary OOD (1) / ID (0)
+        # Mapping OOD
         if "RoadAnomaly" in pathGT:
             ood_gts = np.where((ood_gts==2), 1, ood_gts)
         if "LostAndFound" in pathGT:
@@ -287,24 +283,25 @@ def main():
             ood_gts = np.where((ood_gts==255), 1, ood_gts)
 
         if 1 not in np.unique(ood_gts):
+            # If we skip the image, we need to remove the just appended scores to maintain alignment
+            for t in target_temps:
+                msp_results[t].pop()
             continue              
         else:
             ood_gts_list.append(ood_gts)
-            msp_list.append(msp_score)
-            maxLogit_list.append(maxLogit_score)
-            entropy_list.append(entropy_score)
-            rba_list.append(rba_score)
         
-        del outputs, sem_probs, msp_score, maxLogit_score, entropy_score, rba_score, ood_gts
+        # Memory cleanup
+        del outputs, pixel_logits, scaled_probs, ood_gts
         torch.cuda.empty_cache()
 
     file.write("\n")
-    print("\n")
+    print("\n --- RESULTS FOR TEMPERATURE SCALING --- \n")
     
+    # evaluation function
     def evaluate_metric(score_list, gt_list, method_name):
         if len(score_list) == 0:
             print(f'No data to evaluate for {method_name}.')
-            return
+            return 0.0, 0.0 # Return values to find the best
         
         ood_gts = np.array(gt_list)
         anomaly_scores = np.array(score_list)
@@ -327,12 +324,22 @@ def main():
         res_str = f'[{method_name}] AUPRC: {prc_auc*100.0:.2f} | FPR@95: {fpr*100.0:.2f}'
         print(res_str)
         file.write(res_str + '\n')
+        return prc_auc, fpr
     
-    # FINAL EVALUATION
-    evaluate_metric(msp_list, ood_gts_list, "MSP")
-    evaluate_metric(maxLogit_list, ood_gts_list, "MaxLogit")
-    evaluate_metric(entropy_list, ood_gts_list, "Entropy")
-    evaluate_metric(rba_list, ood_gts_list, "RbA")
+    # FINAL EVALUATION LOOP
+    best_auprc = 0.0
+    best_t = 1.0
+
+    for t in target_temps:
+        method_name = f"MSP (T={t})"
+        auprc, fpr = evaluate_metric(msp_results[t], ood_gts_list, method_name)
+        
+        if auprc > best_auprc:
+            best_auprc = auprc
+            best_t = t
+            
+    print(f"\n>>> BEST TEMPERATURE FOUND: T={best_t} with AUPRC: {best_auprc*100.0:.2f}")
+    file.write(f"Best T: {best_t} (AUPRC: {best_auprc*100.0:.2f})\n")
     
     file.close()
 
