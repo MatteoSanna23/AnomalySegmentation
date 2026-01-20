@@ -100,6 +100,10 @@ class LightningModule(lightning.LightningModule):
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
     def configure_optimizers(self):
+        #! FREEZE THE ENCODER FOR EASY TRAINING
+        for param in self.network.encoder.parameters():
+            param.requires_grad = False
+
         encoder_param_names = {
             n for n, _ in self.network.encoder.backbone.named_parameters()
         }
