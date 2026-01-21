@@ -97,10 +97,24 @@ class LightningModule(lightning.LightningModule):
             incompatible_keys = self.load_state_dict(ckpt, strict=False)
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
 
+        # --- PURIFICAZIONE FINALE DEI PARAMETRI ---
+        # Questo ciclo sostituisce fisicamente i contenitori complessi con nuovi Float32
+        for name, module in self.network.named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                if torch.is_complex(param) or "complex" in str(param.dtype):
+                    print(f"Purificando parametro complesso in memoria: {name}.{param_name}")
+                    new_data = param.data.real.detach().clone().float()
+                    new_param = nn.Parameter(new_data)
+                    new_param.requires_grad = param.requires_grad
+                    setattr(module, param_name, new_param)
+                else:
+                    param.data = param.data.float()
+        # -------------------------------------------
+
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
     def configure_optimizers(self):
-        #! FREEZE THE ENCODER FOR EASY TRAINING
+        #! 1. FREEZE THE ENCODER
         for param in self.network.encoder.parameters():
             param.requires_grad = False
 
@@ -110,19 +124,23 @@ class LightningModule(lightning.LightningModule):
         backbone_param_groups = []
         other_param_groups = []
         backbone_blocks = len(self.network.encoder.backbone.blocks)
-        block_i = backbone_blocks
-
+        
         l2_blocks = torch.arange(
             backbone_blocks - self.network.num_blocks, backbone_blocks
         ).tolist()
 
+        #! 2. ASSEGNAZIONE LR E FILTRO PARAMETRI ATTIVI
+        # Iteriamo su tutti i parametri del modello
         for name, param in reversed(list(self.named_parameters())):
-            lr = self.lr
+            # Se il parametro è freezato (encoder), lo saltiamo completamente
+            if not param.requires_grad:
+                continue
 
+            lr = self.lr
             if name.replace("network.encoder.backbone.", "") in encoder_param_names:
                 name_list = name.split(".")
-
                 is_block = False
+                block_i = backbone_blocks
                 for i, key in enumerate(name_list):
                     if key == "blocks":
                         block_i = int(name_list[i + 1])
@@ -130,30 +148,25 @@ class LightningModule(lightning.LightningModule):
 
                 if is_block or block_i == 0:
                     lr *= self.llrd ** (backbone_blocks - 1 - block_i)
-
                 elif (is_block or block_i == 0) and self.lr_mult != 1.0:
                     lr *= self.lr_mult
 
                 if "backbone.norm" in name:
                     lr = self.lr
 
-                if (
-                    is_block
-                    and (block_i in l2_blocks)
-                    and ((not self.llrd_l2_enabled) or (self.lr_mult != 1.0))
-                ):
+                if (is_block and (block_i in l2_blocks) and 
+                    ((not self.llrd_l2_enabled) or (self.lr_mult != 1.0))):
                     lr = self.lr
 
-                backbone_param_groups.append(
-                    {"params": [param], "lr": lr, "name": name}
-                )
+                backbone_param_groups.append({"params": [param], "lr": lr, "name": name})
             else:
-                other_param_groups.append(
-                    {"params": [param], "lr": self.lr, "name": name}
-                )
+                other_param_groups.append({"params": [param], "lr": self.lr, "name": name})
 
         param_groups = backbone_param_groups + other_param_groups
-        optimizer = AdamW(param_groups, weight_decay=self.weight_decay)
+
+        #! 3. CREAZIONE OTTIMIZZATORE UNICO (CON FIX FOREACH)
+        # Importante: foreach=False impedisce il crash con i tipi ComplexFloat
+        optimizer = AdamW(param_groups, weight_decay=self.weight_decay, foreach=False)
 
         scheduler = TwoStageWarmupPolySchedule(
             optimizer,
@@ -886,6 +899,11 @@ class LightningModule(lightning.LightningModule):
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if "state_dict" in ckpt:
             ckpt = ckpt["state_dict"]
+        
+        # --- AGGIUNTA: Forza tutto in float32 reale ---
+        ckpt = {k: v.real.float() if torch.is_complex(v) else v.float() for k, v in ckpt.items()}
+        # ----------------------------------------------
+
         ckpt = {k: v for k, v in ckpt.items() if "criterion.empty_weight" not in k}
         if not load_ckpt_class_head:
             ckpt = {

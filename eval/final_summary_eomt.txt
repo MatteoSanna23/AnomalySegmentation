@@ -1,0 +1,63 @@
+=== RISULTATI UNIVERSALI EO_MT (768px, 1.25x Sharpening) ===
+Data esecuzione: Mon Jan 19 15:53:16 UTC 2026
+----------------------------------------------------------
+>>> DATASET: RoadAnomaly
+Loading EoMT model weights from: ../../epoch_106-step_19902_eomt.ckpt
+Resizing pos_embed from 64x64 to 48x96
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+38 - 17 - 9 - 45 - 54 - 3 - 47 - 58 - 37 - 11 - 53 - 43 - 56 - 57 - 30 - 21 - 49 - 35 - 32 - 28 - 0 - 33 - 19 - 13 - 27 - 2 - 59 - 18 - 36 - 31 - 26 - 52 - 34 - 10 - 16 - 51 - 24 - 41 - 8 - 4 - 55 - 40 - 42 - 5 - 1 - 23 - 15 - 29 - 14 - 12 - 7 - 48 - 6 - 50 - 20 - 39 - 22 - 25 - 44 - 46 - 
+
+[MSP] AUPRC: 13.19 | FPR@95: 89.10
+[MaxLogit] AUPRC: 10.97 | FPR@95: 84.86
+[Entropy] AUPRC: 7.29 | FPR@95: 97.21
+[RbA] AUPRC: 13.56 | FPR@95: 86.92
+----------------------------------------------------------
+>>> DATASET: RoadAnomaly21
+Loading EoMT model weights from: ../../epoch_106-step_19902_eomt.ckpt
+Resizing pos_embed from 64x64 to 48x96
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+8 - 7 - 2 - 1 - 0 - 4 - 5 - 3 - 6 - 9 - 
+
+[MSP] AUPRC: 20.91 | FPR@95: 92.90
+[MaxLogit] AUPRC: 19.35 | FPR@95: 87.62
+[Entropy] AUPRC: 12.28 | FPR@95: 98.32
+[RbA] AUPRC: 21.27 | FPR@95: 86.55
+----------------------------------------------------------
+>>> DATASET: RoadObsticle21
+Loading EoMT model weights from: ../../epoch_106-step_19902_eomt.ckpt
+Resizing pos_embed from 64x64 to 48x96
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+15 - 27 - 8 - 9 - 14 - 29 - 2 - 28 - 5 - 4 - 6 - 0 - 18 - 17 - 1 - 26 - 11 - 20 - 23 - 16 - 21 - 10 - 12 - 24 - 13 - 22 - 3 - 7 - 25 - 19 - 
+
+[MSP] AUPRC: 3.59 | FPR@95: 69.27
+[MaxLogit] AUPRC: 4.88 | FPR@95: 71.81
+[Entropy] AUPRC: 0.40 | FPR@95: 99.69
+[RbA] AUPRC: 3.36 | FPR@95: 73.18
+----------------------------------------------------------
+>>> DATASET: FS_LostFound_full
+Loading EoMT model weights from: ../../epoch_106-step_19902_eomt.ckpt
+Resizing pos_embed from 64x64 to 48x96
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+93 - 30 - 8 - 52 - 7 - 71 - 86 - 53 - 51 - 17 - 79 - 99 - 67 - 75 - 13 - 66 - 49 - 34 - 2 - 74 - 89 - 35 - 18 - 11 - 62 - 77 - 92 - 58 - 29 - 39 - 26 - 23 - 54 - 32 - 72 - 65 - 81 - 42 - 44 - 24 - 31 - 36 - 69 - 50 - 60 - 56 - 1 - 47 - 88 - 64 - 83 - 0 - 82 - 45 - 46 - 33 - 91 - 68 - 94 - 28 - 12 - 43 - 80 - 48 - 10 - 85 - 70 - 96 - 14 - 37 - 4 - 73 - 20 - 15 - 95 - 22 - 84 - 55 - 97 - 5 - 57 - 41 - 3 - 40 - 90 - 6 - 21 - 63 - 16 - 9 - 78 - 61 - 76 - 19 - 27 - 38 - 87 - 59 - 98 - 25 - 
+
+[MSP] AUPRC: 0.27 | FPR@95: 84.97
+[MaxLogit] AUPRC: 0.28 | FPR@95: 80.41
+[Entropy] AUPRC: 0.24 | FPR@95: 93.72
+[RbA] AUPRC: 0.28 | FPR@95: 82.97
+----------------------------------------------------------
+>>> DATASET: fs_static
+Loading EoMT model weights from: ../../epoch_106-step_19902_eomt.ckpt
+Resizing pos_embed from 64x64 to 48x96
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+17 - 9 - 3 - 11 - 21 - 28 - 0 - 19 - 13 - 27 - 2 - 18 - 26 - 10 - 16 - 24 - 8 - 4 - 5 - 1 - 23 - 15 - 29 - 14 - 12 - 7 - 6 - 20 - 22 - 25 - 
+
+[MSP] AUPRC: 1.67 | FPR@95: 94.79
+[MaxLogit] AUPRC: 2.57 | FPR@95: 95.88
+[Entropy] AUPRC: 2.39 | FPR@95: 88.42
+[RbA] AUPRC: 1.65 | FPR@95: 93.54
+----------------------------------------------------------
