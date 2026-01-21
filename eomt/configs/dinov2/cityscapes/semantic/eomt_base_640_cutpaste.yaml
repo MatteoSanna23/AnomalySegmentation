@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------
+# Config EoMT Base 640 con Cut-Paste Augmentation
+# Per Anomaly Segmentation
+# ---------------------------------------------------------------
+
+trainer:
+  max_epochs: 107
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      resume: allow
+      project: "eomt"
+      name: "cityscapes_semantic_eomt_base_640_cutpaste"
+
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    attn_mask_annealing_enabled: True
+    attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    attn_mask_annealing_end_steps: [6634, 11609, 16585]
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_base_patch14_reg4_dinov2
+
+data:
+  class_path: datasets.cityscapes_semantic_cutpaste.CityscapesSemanticCutPaste
+  init_args:
+    # Path Cityscapes (aggiorna con il tuo path su Lightning.ai)
+    path: "/data/cityscapes"
+    
+    # Path subset COCO OOD (aggiorna con il tuo path)
+    coco_ood_path: "/data/coco_ood"
+    
+    # Parametri dataset standard
+    num_workers: 4
+    batch_size: 2
+    img_size: [640, 640]
+    num_classes: 20  # 19 Cityscapes + 1 anomalia
+    color_jitter_enabled: true
+    scale_range: [0.5, 2.0]
+    
+    # Parametri Cut-Paste
+    cutpaste_enabled: true
+    cutpaste_probability: 0.5      # 50% delle immagini con cut-paste
+    cutpaste_min_objects: 1        # Minimo 1 oggetto
+    cutpaste_max_objects: 3        # Massimo 3 oggetti
+    cutpaste_scale_range: [0.5, 1.5]  # Scala oggetti
+    cutpaste_blend_mode: "alpha_feather"  # Blending con bordi sfumati
+    cutpaste_feather_radius: 5     # Raggio sfumatura
