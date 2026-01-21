@@ -7,9 +7,13 @@
 from typing import List, Optional
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
 
 from training.mask_classification_loss import MaskClassificationLoss
 from training.lightning_module import LightningModule
+from training.lora_config import apply_lora_to_model, print_trainable_parameters
+
+logger = logging.getLogger(__name__)
 
 
 class MaskClassificationSemantic(LightningModule):
@@ -41,7 +45,21 @@ class MaskClassificationSemantic(LightningModule):
         ckpt_path: Optional[str] = None,
         delta_weights: bool = False,
         load_ckpt_class_head: bool = True,
+        use_lora: bool = False,
     ):
+        # Apply LoRA if enabled
+        if use_lora:
+            logger.info("=" * 80)
+            logger.info("APPLYING LoRA TO MODEL")
+            logger.info("=" * 80)
+            network = apply_lora_to_model(
+                network,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+            )
+            logger.info("LoRA applied successfully!")
+
         super().__init__(
             network=network,
             img_size=img_size,
@@ -63,6 +81,14 @@ class MaskClassificationSemantic(LightningModule):
 
         self.save_hyperparameters(ignore=["_class_path"])
 
+        # Print trainable parameters after LoRA application
+        print_trainable_parameters(
+            self.network,
+            load_ckpt_class_head=load_ckpt_class_head,
+        )
+
+        self.save_hyperparameters(ignore=["_class_path"])
+
         self.ignore_idx = ignore_idx
         self.mask_thresh = mask_thresh
         self.overlap_thresh = overlap_thresh
@@ -79,7 +105,10 @@ class MaskClassificationSemantic(LightningModule):
             no_object_coefficient=no_object_coefficient,
         )
 
-        self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)
+        self.init_metrics_semantic(
+            ignore_idx,
+            self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1,
+        )
 
     def eval_step(
         self,
