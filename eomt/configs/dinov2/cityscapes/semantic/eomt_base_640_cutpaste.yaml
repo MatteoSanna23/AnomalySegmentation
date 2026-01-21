@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------
+# Config EoMT Base 640 con Cut-Paste pre-generato
+# ---------------------------------------------------------------
+
+trainer:
+  max_epochs: 107
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      resume: allow
+      project: "eomt"
+      name: "cityscapes_semantic_eomt_base_640_cutpaste"
+
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    # Dimensioni e classi
+    img_size: [640, 640]
+    num_classes: 20  # 19 Cityscapes + 1 anomalia (class_head avrà 21 col +1 no-object)
+    
+    attn_mask_annealing_enabled: True
+    attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    attn_mask_annealing_end_steps: [6634, 11609, 16585]
+    
+    # Carica checkpoint senza class_head (verrà reinizializzato per 21 classi)
+    load_ckpt_class_head: false
+    
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3
+        num_classes: 20  # Deve matchare col model
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_base_patch14_reg4_dinov2
+
+data:
+  class_path: datasets.cityscapes_semantic_cutpaste.CityscapesSemanticCutPaste
+  init_args:
+    # Path al dataset pre-generato con cut-paste
+    path: "/teamspace/studios/this_studio/cityscapes_cutpaste"
+    
+    # Path ai zip originali per validation
+    original_cityscapes_path: "/teamspace/studios/this_studio/datasets"
+    
+    # Parametri dataset
+    num_workers: 4
+    batch_size: 2
+    img_size: [640, 640]
+    num_classes: 20  # 19 Cityscapes + 1 anomalia
+    color_jitter_enabled: true
+    scale_range: [0.5, 2.0]

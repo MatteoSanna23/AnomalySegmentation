@@ -102,7 +102,9 @@ class LightningModule(lightning.LightningModule):
         for name, module in self.network.named_modules():
             for param_name, param in module.named_parameters(recurse=False):
                 if torch.is_complex(param) or "complex" in str(param.dtype):
-                    print(f"Purificando parametro complesso in memoria: {name}.{param_name}")
+                    print(
+                        f"Purificando parametro complesso in memoria: {name}.{param_name}"
+                    )
                     new_data = param.data.real.detach().clone().float()
                     new_param = nn.Parameter(new_data)
                     new_param.requires_grad = param.requires_grad
@@ -124,7 +126,7 @@ class LightningModule(lightning.LightningModule):
         backbone_param_groups = []
         other_param_groups = []
         backbone_blocks = len(self.network.encoder.backbone.blocks)
-        
+
         l2_blocks = torch.arange(
             backbone_blocks - self.network.num_blocks, backbone_blocks
         ).tolist()
@@ -154,13 +156,20 @@ class LightningModule(lightning.LightningModule):
                 if "backbone.norm" in name:
                     lr = self.lr
 
-                if (is_block and (block_i in l2_blocks) and 
-                    ((not self.llrd_l2_enabled) or (self.lr_mult != 1.0))):
+                if (
+                    is_block
+                    and (block_i in l2_blocks)
+                    and ((not self.llrd_l2_enabled) or (self.lr_mult != 1.0))
+                ):
                     lr = self.lr
 
-                backbone_param_groups.append({"params": [param], "lr": lr, "name": name})
+                backbone_param_groups.append(
+                    {"params": [param], "lr": lr, "name": name}
+                )
             else:
-                other_param_groups.append({"params": [param], "lr": self.lr, "name": name})
+                other_param_groups.append(
+                    {"params": [param], "lr": self.lr, "name": name}
+                )
 
         param_groups = backbone_param_groups + other_param_groups
 
@@ -899,10 +908,56 @@ class LightningModule(lightning.LightningModule):
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if "state_dict" in ckpt:
             ckpt = ckpt["state_dict"]
-        
+
         # --- AGGIUNTA: Forza tutto in float32 reale ---
-        ckpt = {k: v.real.float() if torch.is_complex(v) else v.float() for k, v in ckpt.items()}
+        ckpt = {
+            k: v.real.float() if torch.is_complex(v) else v.float()
+            for k, v in ckpt.items()
+        }
         # ----------------------------------------------
+
+        # --- AGGIUNTA: Interpola pos_embed se dimensione diversa ---
+        pos_embed_key = "network.encoder.backbone.pos_embed"
+        if pos_embed_key in ckpt:
+            ckpt_pos_embed = ckpt[pos_embed_key]
+            current_pos_embed = self.state_dict().get(pos_embed_key)
+            if (
+                current_pos_embed is not None
+                and ckpt_pos_embed.shape != current_pos_embed.shape
+            ):
+                logging.info(
+                    f"Interpolating pos_embed from {ckpt_pos_embed.shape} to {current_pos_embed.shape}"
+                )
+                # pos_embed shape: [1, num_patches, embed_dim]
+                ckpt_num_patches = ckpt_pos_embed.shape[1]
+                current_num_patches = current_pos_embed.shape[1]
+                embed_dim = ckpt_pos_embed.shape[2]
+
+                # Calcola grid size
+                ckpt_grid_size = int(ckpt_num_patches**0.5)
+                current_grid_size = int(current_num_patches**0.5)
+
+                # Reshape to grid, interpolate, reshape back
+                ckpt_pos_embed = ckpt_pos_embed.reshape(
+                    1, ckpt_grid_size, ckpt_grid_size, embed_dim
+                )
+                ckpt_pos_embed = ckpt_pos_embed.permute(
+                    0, 3, 1, 2
+                )  # [1, embed_dim, H, W]
+
+                interpolated = torch.nn.functional.interpolate(
+                    ckpt_pos_embed,
+                    size=(current_grid_size, current_grid_size),
+                    mode="bicubic",
+                    align_corners=False,
+                )
+
+                interpolated = interpolated.permute(0, 2, 3, 1)  # [1, H, W, embed_dim]
+                interpolated = interpolated.reshape(1, current_num_patches, embed_dim)
+
+                ckpt[pos_embed_key] = interpolated
+                logging.info(f"pos_embed interpolated successfully")
+        # -----------------------------------------------------------
 
         ckpt = {k: v for k, v in ckpt.items() if "criterion.empty_weight" not in k}
         if not load_ckpt_class_head:
