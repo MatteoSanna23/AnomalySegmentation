@@ -140,8 +140,14 @@ class LightningCLI(cli.LightningCLI):
         )
 
     def fit(self, model, **kwargs):
+        gitignore_path = ".gitignore"
+        if os.path.exists(gitignore_path):
+            is_gitignored = parse_gitignore(gitignore_path)
+        else:
+            def is_gitignored(path):
+                return False  # Nessun file viene escluso
+
         if hasattr(self.trainer.logger.experiment, "log_code"):
-            is_gitignored = parse_gitignore(".gitignore")
             include_fn = lambda path: path.endswith(".py") or path.endswith(".yaml")
             self.trainer.logger.experiment.log_code(
                 ".", include_fn=include_fn, exclude_fn=is_gitignored
