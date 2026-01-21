@@ -13,7 +13,6 @@ from typing import List, Optional
 import torch.distributed as dist
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss,
     Mask2FormerHungarianMatcher,
@@ -119,58 +118,3 @@ class MaskClassificationLoss(Mask2FormerLoss):
         log_fn("losses/train_loss_total", loss_total, sync_dist=True, prog_bar=True)
 
         return loss_total  # type: ignore
-    
-    def loss_labels(self, class_queries_logits, class_labels, indices):
-        idx = self._get_src_permutation_idx(indices)
-
-        target_classes_o = torch.cat(
-            [t[J] for t, (_, J) in zip(class_labels, indices)]
-        )
-
-        target_classes = torch.full(
-            class_queries_logits.shape[:2],
-            self.num_labels,  # no-object
-            dtype=torch.int64,
-            device=class_queries_logits.device,
-        )
-        target_classes[idx] = target_classes_o
-
-        # -------------------------------
-        # LOGIT NORMALIZATION (SAFE)
-        # -------------------------------
-        tau = 0.04
-        eps = 1e-6
-
-        # separa classi reali e no-object
-        class_logits = class_queries_logits[..., :-1]   # [B, Q, C]
-        no_obj_logit = class_queries_logits[..., -1:]   # [B, Q, 1]
-
-        # L2 norm SOLO sulle classi reali
-        norm = torch.norm(class_logits, p=2, dim=-1, keepdim=True)
-        norm = torch.clamp(norm, min=eps)
-
-        class_logits = (class_logits / norm) / tau
-
-        # ricomponi
-        logits = torch.cat([class_logits, no_obj_logit], dim=-1)
-
-        # (opzionale ma consigliato con AMP)
-        logits = logits.float()
-        # -------------------------------
-
-        loss_ce = F.cross_entropy(
-            logits.transpose(1, 2),
-            target_classes,
-            weight=self.empty_weight,
-            reduction="mean",
-        )
-
-        return {"loss_cross_entropy": loss_ce}
-    
-    def _get_src_permutation_idx(self, indices):
-        # indices: List[Tuple[src_idx, tgt_idx]]
-        batch_idx = torch.cat(
-            [torch.full_like(src, i) for i, (src, _) in enumerate(indices)]
-        )
-        src_idx = torch.cat([src for (src, _) in indices])
-        return batch_idx, src_idx
