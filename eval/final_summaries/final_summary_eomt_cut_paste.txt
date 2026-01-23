@@ -1,0 +1,78 @@
+=== RISULTATI UNIVERSALI EO_MT ===
+Data esecuzione: Fri Jan 23 14:42:50 UTC 2026
+----------------------------------------------------------
+>>> DATASET: RoadAnomaly
+Loading EoMT model weights from: /teamspace/studios/this_studio/AML/checkpoints/eomt_6o1qopf2_checkpoints_epoch=2_step=1116_postArcFaceAndCOCO.ckpt
+Resizing pos_embed from 40x40 to 32x64
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+25 - 43 - 1 - 8 - 59 - 27 - 18 - 19 - 6 - 12 - 31 - 10 - 5 - 50 - 23 - 39 - 42 - 4 - 21 - 28 - 49 - 48 - 24 - 7 - 57 - 40 - 9 - 13 - 35 - 41 - 3 - 30 - 47 - 16 - 51 - 55 - 33 - 11 - 32 - 17 - 36 - 46 - 29 - 0 - 45 - 53 - 44 - 54 - 38 - 56 - 14 - 58 - 15 - 52 - 26 - 22 - 37 - 2 - 34 - 20 - 
+
+--- STANDARD METRICS (Normalized on 19 Classes) ---
+[MSP] AUPRC: 7.97 | FPR@95: 97.05
+[MaxLogit] AUPRC: 15.54 | FPR@95: 71.19
+[Entropy] AUPRC: 21.72 | FPR@95: 91.34
+[RbA] AUPRC: 7.21 | FPR@95: 99.04
+--- NEW METRIC (Using Learned Anomaly Class) ---
+[Learned_Anomaly] AUPRC: 25.11 | FPR@95: 91.34
+----------------------------------------------------------
+>>> DATASET: RoadAnomaly21
+Loading EoMT model weights from: /teamspace/studios/this_studio/AML/checkpoints/eomt_6o1qopf2_checkpoints_epoch=2_step=1116_postArcFaceAndCOCO.ckpt
+Resizing pos_embed from 40x40 to 32x64
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+9 - 1 - 3 - 2 - 7 - 8 - 0 - 6 - 4 - 5 - 
+
+--- STANDARD METRICS (Normalized on 19 Classes) ---
+[MSP] AUPRC: 15.62 | FPR@95: 95.42
+[MaxLogit] AUPRC: 22.49 | FPR@95: 76.36
+[Entropy] AUPRC: 21.06 | FPR@95: 95.42
+[RbA] AUPRC: 14.53 | FPR@95: 97.42
+--- NEW METRIC (Using Learned Anomaly Class) ---
+[Learned_Anomaly] AUPRC: 25.17 | FPR@95: 95.42
+----------------------------------------------------------
+>>> DATASET: RoadObsticle21
+Loading EoMT model weights from: /teamspace/studios/this_studio/AML/checkpoints/eomt_6o1qopf2_checkpoints_epoch=2_step=1116_postArcFaceAndCOCO.ckpt
+Resizing pos_embed from 40x40 to 32x64
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+8 - 2 - 25 - 13 - 22 - 21 - 19 - 15 - 23 - 12 - 0 - 3 - 20 - 10 - 18 - 5 - 29 - 27 - 1 - 7 - 16 - 26 - 6 - 4 - 24 - 14 - 11 - 17 - 9 - 28 - 
+
+--- STANDARD METRICS (Normalized on 19 Classes) ---
+[MSP] AUPRC: 0.50 | FPR@95: 99.99
+[MaxLogit] AUPRC: 10.75 | FPR@95: 56.73
+[Entropy] AUPRC: 6.90 | FPR@95: 75.42
+[RbA] AUPRC: 0.39 | FPR@95: 100.00
+--- NEW METRIC (Using Learned Anomaly Class) ---
+[Learned_Anomaly] AUPRC: 25.56 | FPR@95: 57.74
+----------------------------------------------------------
+>>> DATASET: FS_LostFound_full
+Loading EoMT model weights from: /teamspace/studios/this_studio/AML/checkpoints/eomt_6o1qopf2_checkpoints_epoch=2_step=1116_postArcFaceAndCOCO.ckpt
+Resizing pos_embed from 40x40 to 32x64
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+52 - 46 - 80 - 62 - 9 - 64 - 19 - 89 - 84 - 57 - 93 - 59 - 14 - 88 - 12 - 69 - 81 - 60 - 1 - 92 - 54 - 21 - 97 - 85 - 47 - 43 - 10 - 55 - 16 - 33 - 73 - 15 - 3 - 67 - 45 - 11 - 30 - 41 - 2 - 72 - 7 - 44 - 56 - 27 - 23 - 91 - 25 - 24 - 83 - 66 - 82 - 50 - 63 - 8 - 74 - 40 - 51 - 95 - 39 - 0 - 94 - 6 - 61 - 53 - 68 - 71 - 38 - 4 - 78 - 34 - 49 - 5 - 70 - 36 - 29 - 98 - 20 - 35 - 87 - 31 - 32 - 96 - 65 - 37 - 17 - 28 - 48 - 76 - 22 - 77 - 79 - 26 - 86 - 99 - 75 - 90 - 58 - 18 - 42 - 13 - 
+
+--- STANDARD METRICS (Normalized on 19 Classes) ---
+[MSP] AUPRC: 0.36 | FPR@95: 95.94
+[MaxLogit] AUPRC: 0.37 | FPR@95: 74.33
+[Entropy] AUPRC: 0.34 | FPR@95: 96.40
+[RbA] AUPRC: 0.34 | FPR@95: 97.84
+--- NEW METRIC (Using Learned Anomaly Class) ---
+[Learned_Anomaly] AUPRC: 0.47 | FPR@95: 96.40
+----------------------------------------------------------
+>>> DATASET: fs_static
+Loading EoMT model weights from: /teamspace/studios/this_studio/AML/checkpoints/eomt_6o1qopf2_checkpoints_epoch=2_step=1116_postArcFaceAndCOCO.ckpt
+Resizing pos_embed from 40x40 to 32x64
+Adapting attn_mask_probs from torch.Size([3]) to torch.Size([4])
+Weights loaded. Missing keys: [], Unexpected keys: ['criterion.empty_weight']
+25 - 1 - 8 - 27 - 18 - 19 - 6 - 12 - 10 - 5 - 23 - 4 - 21 - 28 - 24 - 7 - 9 - 13 - 3 - 16 - 11 - 17 - 29 - 0 - 14 - 15 - 26 - 22 - 2 - 20 - 
+
+--- STANDARD METRICS (Normalized on 19 Classes) ---
+[MSP] AUPRC: 2.24 | FPR@95: 95.39
+[MaxLogit] AUPRC: 2.23 | FPR@95: 84.11
+[Entropy] AUPRC: 2.19 | FPR@95: 95.26
+[RbA] AUPRC: 2.17 | FPR@95: 96.67
+--- NEW METRIC (Using Learned Anomaly Class) ---
+[Learned_Anomaly] AUPRC: 2.88 | FPR@95: 95.26
+----------------------------------------------------------
