@@ -25,9 +25,13 @@ Usage:
 """
 
 from pathlib import Path
-from typing import Union, Optional
-from torch.utils.data import DataLoader
+from typing import Union
+import torch
+from torch.utils.data import DataLoader, Dataset as TorchDataset
 from torchvision.datasets import Cityscapes
+from torchvision import tv_tensors
+from torchvision.transforms.v2 import functional as F
+from PIL import Image
 
 from datasets.lightning_data_module import LightningDataModule
 from datasets.dataset import Dataset
@@ -54,23 +58,15 @@ class CityscapesSemanticCutPaste(LightningDataModule):
 
     def __init__(
         self,
-        path: str,
-        coco_ood_path: str,
+        path: str,  # Path al dataset pre-generato
+        original_cityscapes_path: str = None,  # Path ai zip originali per validation
         num_workers: int = 4,
         batch_size: int = 16,
         img_size: tuple[int, int] = (1024, 1024),
-        num_classes: int = 19,
+        num_classes: int = 20,  # 19 + anomalia
         color_jitter_enabled: bool = True,
         scale_range: tuple = (0.5, 2.0),
         check_empty_targets: bool = True,
-        # Cut-Paste params
-        cutpaste_enabled: bool = True,
-        cutpaste_probability: float = 0.5,
-        cutpaste_min_objects: int = 1,
-        cutpaste_max_objects: int = 3,
-        cutpaste_scale_range: tuple = (0.5, 1.5),
-        cutpaste_blend_mode: str = "alpha_feather",
-        cutpaste_feather_radius: int = 5,
     ) -> None:
         """
         Initialize the Cityscapes Cut-Paste DataModule.
