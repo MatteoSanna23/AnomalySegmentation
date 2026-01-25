@@ -12,16 +12,7 @@ from models.lora import LoRALinear, replace_linear_with_lora, count_lora_paramet
 
 
 class LoRAConfig:
-    """Configuration for LoRA adaptation.
-
-    Attributes:
-        enabled: Whether to enable LoRA
-        rank: Rank of LoRA matrices
-        lora_alpha: Scaling factor for LoRA
-        lora_dropout: Dropout probability
-        target_modules: List of module patterns to apply LoRA to
-        freeze_base_model: Whether to freeze base model weights
-    """
+    """Configuration for LoRA adaptation."""
 
     def __init__(
         self,
@@ -37,13 +28,11 @@ class LoRAConfig:
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
         self.target_modules = target_modules or [
-            "class_head",
-            "mask_head",
+            "qkv", "proj", "fc1", "fc2"
         ]
         self.freeze_base_model = freeze_base_model
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert config to dictionary."""
         return {
             "enabled": self.enabled,
             "rank": self.rank,
@@ -58,116 +47,78 @@ def apply_lora_to_vit(
     model: nn.Module,
     config: LoRAConfig,
 ) -> None:
-    """Applica LoRA ai moduli target del modello (class_head, mask_head).
-    Sostituisce Linear → LoRALinear e congela il modello base."""
+    """Applica LoRA cercando i moduli target in tutto il modello."""
 
     if not config.enabled:
         return
 
-    # Apply LoRA to specified modules
-    for target_module in config.target_modules:
-        parts = target_module.split(".")
-        current = model
+    print(f"Applying LoRA to targets: {config.target_modules}")
+    applied_count = 0
 
-        # Navigate to the target module
-        try:
-            for part in parts[:-1]:
-                current = getattr(current, part)
+    # Iteriamo su TUTTI i moduli del network per trovare quelli che matchano i target
+    for name, module in model.named_modules():
+        # Controlliamo i figli diretti di questo modulo
+        for child_name, child in module.named_children():
+            if child_name in config.target_modules and isinstance(child, nn.Linear):
+                # Trovato un target! (es. è un Linear e si chiama 'qkv')
+                
+                # Creiamo il layer LoRA
+                lora_linear = LoRALinear(
+                    child.in_features,
+                    child.out_features,
+                    rank=config.rank,
+                    lora_alpha=config.lora_alpha,
+                    lora_dropout=config.lora_dropout,
+                )
 
-            target = getattr(current, parts[-1])
+                # Copiamo i pesi originali e li congeliamo
+                lora_linear.weight.data.copy_(child.weight.data)
+                lora_linear.weight.requires_grad = False
 
-            # Apply LoRA to all Linear layers in the target
-            _apply_lora_to_module(
-                target,
-                rank=config.rank,
-                lora_alpha=config.lora_alpha,
-                lora_dropout=config.lora_dropout,
-            )
-        except AttributeError:
-            print(f"Warning: Could not find module {target_module}")
+                if child.bias is not None and lora_linear.bias is not None:
+                    lora_linear.bias.data.copy_(child.bias.data)
+                    lora_linear.bias.requires_grad = False
+
+                # Sostituiamo il layer originale con quello LoRA
+                setattr(module, child_name, lora_linear)
+                applied_count += 1
+                # print(f"  -> LoRA injected in: {name}.{child_name}")
+
+    if applied_count == 0:
+        print("WARNING: Nessun modulo LoRA è stato applicato! Verifica 'target_modules' nel config.")
+    else:
+        print(f"Successfully applied LoRA to {applied_count} layers.")
 
     # Freeze base model if requested
     if config.freeze_base_model:
         _freeze_base_model(model)
 
 
-def _apply_lora_to_module(
-    module: nn.Module,
-    rank: int = 8,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.1,
-) -> None:
-    """Sostituisce ricorsivamente Linear con LoRALinear in tutti i child del modulo."""
-
-    for name, child in module.named_children():
-        if isinstance(child, nn.Linear):
-            # Replace with LoRA
-            lora_linear = LoRALinear(
-                child.in_features,
-                child.out_features,
-                rank=rank,
-                lora_alpha=lora_alpha,
-                lora_dropout=lora_dropout,
-            )
-
-            # Copy original weights and freeze them
-            lora_linear.weight.data.copy_(child.weight.data)
-            lora_linear.weight.requires_grad = False
-
-            if child.bias is not None and lora_linear.bias is not None:
-                lora_linear.bias.data.copy_(child.bias.data)
-                lora_linear.bias.requires_grad = False
-
-            setattr(module, name, lora_linear)
-        else:
-            # Recursively apply to children
-            _apply_lora_to_module(
-                child,
-                rank=rank,
-                lora_alpha=lora_alpha,
-                lora_dropout=lora_dropout,
-            )
-
-
 def _freeze_base_model(model: nn.Module) -> None:
     """
     Congela il modello base ma MANTIENE SBLOCCATE:
-    1. Le parti LoRA (ovviamente)
-    2. Le teste di classificazione (che contengono 'head')
-    3. Opzionale: I layer di normalizzazione (spesso aiuta il training)
+    1. Le parti LoRA
+    2. Le teste di classificazione ('head')
+    3. I layer di normalizzazione ('norm') - Opzionale ma consigliato
     """
-    # Lista di parole chiave che, se presenti nel nome, EVITANO il congelamento
-    # 'head': per class_head e mask_head
-    # 'norm': (opzionale) per LayerNorm/BatchNorm, spesso aiuta lasciarle libere
-    modules_to_keep = ["head", "norm"]
+    modules_to_keep = ["head", "norm"] 
 
-    print(f"Congelamento modello base avviato. Moduli esclusi: {modules_to_keep}")
+    print(f"Freezing base model. Keeping trainable: LoRA layers + {modules_to_keep}")
 
     for name, param in model.named_parameters():
-        # Se è un parametro LoRA, deve essere trainabile (LoRALinear lo fa già, ma controlliamo)
+        # 1. Se è LoRA -> Trainable
         if "lora_" in name:
             param.requires_grad = True
-
-        # Se il nome contiene una delle parole chiave "protette" (es. "class_head")
+        
+        # 2. Se è una testa o norm -> Trainable
         elif any(k in name for k in modules_to_keep):
             param.requires_grad = True
-            # print(f"  -> Keeping trainable: {name}") # Scommenta per debug
-
-        # Altrimenti, congela spietatamente
+            
+        # 3. Tutto il resto -> Frozen
         else:
             param.requires_grad = False
 
-
 def get_lora_stats(model: nn.Module) -> Dict[str, Any]:
-    """Get statistics about LoRA parameters in the model.
-
-    Args:
-        model: The model to analyze
-
-    Returns:
-        Dictionary with parameter statistics
-    """
-
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -183,26 +134,14 @@ def get_lora_stats(model: nn.Module) -> Dict[str, Any]:
         "efficiency": (lora_params / total_params * 100) if total_params > 0 else 0,
     }
 
-
 def print_lora_summary(model: nn.Module, config: LoRAConfig) -> None:
-    """Print a summary of LoRA configuration and statistics.
-
-    Args:
-        model: The model with LoRA
-        config: LoRA configuration
-    """
-
     stats = get_lora_stats(model)
-
     print("\n" + "=" * 60)
     print("LoRA Configuration Summary")
     print("=" * 60)
     print(f"Enabled: {config.enabled}")
     print(f"Rank: {config.rank}")
-    print(f"Alpha: {config.lora_alpha}")
-    print(f"Dropout: {config.lora_dropout}")
     print(f"Target Modules: {config.target_modules}")
-    print(f"Freeze Base Model: {config.freeze_base_model}")
     print("-" * 60)
     print(f"Total Parameters: {stats['total_params']:,}")
     print(f"Trainable Parameters: {stats['trainable_params']:,}")
