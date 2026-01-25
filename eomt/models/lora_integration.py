@@ -58,12 +58,8 @@ def apply_lora_to_vit(
     model: nn.Module,
     config: LoRAConfig,
 ) -> None:
-    """Apply LoRA to Vision Transformer model.
-
-    Args:
-        model: The ViT or EoMT model to adapt
-        config: LoRA configuration
-    """
+    """Applica LoRA ai moduli target del modello (class_head, mask_head).
+    Sostituisce Linear → LoRALinear e congela il modello base."""
 
     if not config.enabled:
         return
@@ -101,7 +97,7 @@ def _apply_lora_to_module(
     lora_alpha: int = 16,
     lora_dropout: float = 0.1,
 ) -> None:
-    """Recursively apply LoRA to all Linear layers in a module."""
+    """Sostituisce ricorsivamente Linear con LoRALinear in tutti i child del modulo."""
 
     for name, child in module.named_children():
         if isinstance(child, nn.Linear):
@@ -134,9 +130,31 @@ def _apply_lora_to_module(
 
 
 def _freeze_base_model(model: nn.Module) -> None:
-    """Freeze all parameters except LoRA parameters."""
+    """
+    Congela il modello base ma MANTIENE SBLOCCATE:
+    1. Le parti LoRA (ovviamente)
+    2. Le teste di classificazione (che contengono 'head')
+    3. Opzionale: I layer di normalizzazione (spesso aiuta il training)
+    """
+    # Lista di parole chiave che, se presenti nel nome, EVITANO il congelamento
+    # 'head': per class_head e mask_head
+    # 'norm': (opzionale) per LayerNorm/BatchNorm, spesso aiuta lasciarle libere
+    modules_to_keep = ["head", "norm"]
+
+    print(f"Congelamento modello base avviato. Moduli esclusi: {modules_to_keep}")
+
     for name, param in model.named_parameters():
-        if "lora_" not in name:
+        # Se è un parametro LoRA, deve essere trainabile (LoRALinear lo fa già, ma controlliamo)
+        if "lora_" in name:
+            param.requires_grad = True
+
+        # Se il nome contiene una delle parole chiave "protette" (es. "class_head")
+        elif any(k in name for k in modules_to_keep):
+            param.requires_grad = True
+            # print(f"  -> Keeping trainable: {name}") # Scommenta per debug
+
+        # Altrimenti, congela spietatamente
+        else:
             param.requires_grad = False
 
 
