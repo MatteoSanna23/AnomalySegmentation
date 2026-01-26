@@ -1,41 +1,38 @@
-"""
-Cityscapes Semantic Dataset with Cut-Paste Augmentation
-========================================================
+# Cityscapes Semantic Dataset with Cut-Paste Augmentation
+# ------------------------------------------------------
+# This module defines a Lightning DataModule for semantic segmentation training
+# with synthetic anomaly augmentation (Cut-Paste strategy, now offline only).
+#
+# Key features:
+# - Extends the standard Cityscapes dataset for semantic segmentation
+# - Supports anomaly class (label ID 254) in segmentation masks
+# - Designed for use with EoMT training pipeline
+# - Uses pre-generated (offline) augmented data, no runtime augmentation
 
-This module provides a Lightning DataModule for training semantic segmentation
-models with synthetic anomaly augmentation using the Cut-Paste strategy.
 
-Key Features:
-- Extends standard Cityscapes semantic segmentation dataset
-- Integrates Cut-Paste augmentation to paste OOD objects from COCO
-- Supports anomaly class (label ID 254) in segmentation masks
-- Compatible with EoMT training pipeline
+# Standard library imports
+from pathlib import Path  # For filesystem path manipulations
+from typing import Union  # For type hinting
 
-Architecture:
-    CityscapesSemanticCutPaste (LightningDataModule)
-        ├── DatasetWithCutPaste (training) - applies cut-paste before transforms
-        └── Dataset (validation) - standard Cityscapes without augmentation
+# PyTorch and torchvision imports
+import torch  # PyTorch core
+from torch.utils.data import (
+    DataLoader,
+    Dataset as TorchDataset,
+)  # Data loading utilities
+from torchvision.datasets import (
+    Cityscapes,
+)  # Cityscapes dataset class (not directly used)
+from torchvision import tv_tensors  # For mask tensor types
+from torchvision.transforms.v2 import functional as F  # Image transform functions
+from PIL import Image  # For image loading
 
-Usage:
-    datamodule = CityscapesSemanticCutPaste(
-        path="/path/to/cityscapes",
-        coco_ood_path="/path/to/coco_ood",
-        cutpaste_probability=0.5,
-    )
-"""
-
-from pathlib import Path
-from typing import Union
-import torch
-from torch.utils.data import DataLoader, Dataset as TorchDataset
-from torchvision.datasets import Cityscapes
-from torchvision import tv_tensors
-from torchvision.transforms.v2 import functional as F
-from PIL import Image
-
-from datasets.lightning_data_module import LightningDataModule
-from datasets.dataset import Dataset
-from datasets.transforms import Transforms
+# Local project imports
+from datasets.lightning_data_module import (
+    LightningDataModule,
+)  # Base Lightning DataModule
+from datasets.dataset import Dataset  # Custom dataset wrapper
+from datasets.transforms import Transforms  # Custom transform pipeline
 
 
 # =============================================================================
@@ -43,7 +40,9 @@ from datasets.transforms import Transforms
 # =============================================================================
 
 
-class CityscapesSemanticCutPaste(LightningDataModule):
+class CityscapesSemanticCutPaste(
+    LightningDataModule
+):  # Main DataModule for Cityscapes with anomaly support
     """
     Lightning DataModule for Cityscapes with Cut-Paste anomaly augmentation.
 
@@ -57,15 +56,15 @@ class CityscapesSemanticCutPaste(LightningDataModule):
 
     def __init__(
         self,
-        path: str,  # Path al dataset pre-generato
-        original_cityscapes_path: str = None,  # Path ai zip originali per validation
-        num_workers: int = 4,
-        batch_size: int = 16,
-        img_size: tuple[int, int] = (1024, 1024),
-        num_classes: int = 20,  # 19 + anomalia
-        color_jitter_enabled: bool = True,
-        scale_range: tuple = (0.5, 2.0),
-        check_empty_targets: bool = True,
+        path: str,  # Path to the pre-generated (offline) Cityscapes dataset
+        original_cityscapes_path: str = None,  # Path to original zips for validation (optional)
+        num_workers: int = 4,  # Number of DataLoader workers
+        batch_size: int = 16,  # Batch size for training
+        img_size: tuple[int, int] = (1024, 1024),  # Target image size (H, W)
+        num_classes: int = 20,  # Number of classes (19 Cityscapes + 1 anomaly)
+        color_jitter_enabled: bool = True,  # Enable color jitter augmentation
+        scale_range: tuple = (0.5, 2.0),  # Scale range for random resize
+        check_empty_targets: bool = True,  # Skip samples with empty masks
     ) -> None:
         """
         Initialize the Cityscapes Cut-Paste DataModule.
@@ -89,6 +88,7 @@ class CityscapesSemanticCutPaste(LightningDataModule):
             cutpaste_feather_radius: Blur radius for feathered edges.
         """
         # Initialize parent LightningDataModule
+        # Initialize parent LightningDataModule with basic dataset settings
         super().__init__(
             path=path,
             batch_size=batch_size,
@@ -97,7 +97,9 @@ class CityscapesSemanticCutPaste(LightningDataModule):
             img_size=img_size,
             check_empty_targets=check_empty_targets,
         )
-        self.save_hyperparameters(ignore=["_class_path"])
+        self.save_hyperparameters(
+            ignore=["_class_path"]
+        )  # Save hyperparameters for checkpointing
 
         # Initialize image transforms (color jitter, random scale, etc.)
         self.transforms = Transforms(
@@ -107,7 +109,9 @@ class CityscapesSemanticCutPaste(LightningDataModule):
         )
 
     @staticmethod
-    def target_parser(target, anomaly_label_id: int = 254, **kwargs):
+    def target_parser(
+        target, anomaly_label_id: int = 254, **kwargs
+    ):  # Parses mask into per-class binary masks
         """
         Parse segmentation mask into per-class masks, including anomaly class.
 
@@ -125,20 +129,22 @@ class CityscapesSemanticCutPaste(LightningDataModule):
                 - labels: List of train_ids corresponding to each mask
                 - is_crowd: List of False values (no crowd annotations)
         """
-        masks, labels = [], []  # Accumulate masks and their class labels
+        masks, labels = [], []  # List to accumulate binary masks and their class labels
 
-        # Iterate over unique label IDs present in the mask
+        # Iterate over all unique label IDs in the mask
         for label_id in target[0].unique():
-            # Handle anomaly class (synthetic OOD objects from Cut-Paste)
+            # If the label is the anomaly class (254), treat as anomaly
             if label_id == anomaly_label_id:
                 masks.append(target[0] == label_id)  # Binary mask for anomaly pixels
-                labels.append(19)  # Anomaly uses train_id=19 (Cityscapes uses 0-18)
+                labels.append(
+                    19
+                )  # Assign train_id=19 for anomaly (Cityscapes uses 0-18)
                 continue
 
-            # Find corresponding Cityscapes class by label ID
+            # Find the corresponding Cityscapes class for this label ID
             cls = next((cls for cls in Cityscapes.classes if cls.id == label_id), None)
 
-            # Skip unknown classes or classes ignored during evaluation
+            # Skip unknown or ignored classes
             if cls is None or cls.ignore_in_eval:
                 continue
 
@@ -146,26 +152,32 @@ class CityscapesSemanticCutPaste(LightningDataModule):
             masks.append(target[0] == label_id)
             labels.append(cls.train_id)
 
-        # Return masks, labels, and is_crowd flag (always False for Cityscapes)
+        # Return masks, labels, and is_crowd (always False for Cityscapes)
         return masks, labels, [False for _ in range(len(masks))]
 
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
-        # Crea wrapper per transforms che include cut-paste
-        train_transforms = self._create_train_transforms()
+        # Setup method: prepares datasets for training and validation
+        train_transforms = self._create_train_transforms()  # Get training transforms
 
+        # Common dataset keyword arguments
         cityscapes_dataset_kwargs = {
-            "img_suffix": ".png",
-            "target_suffix": ".png",
-            "img_stem_suffix": "leftImg8bit",
-            "target_stem_suffix": "gtFine_labelIds",
-            "zip_path": Path(self.path, "leftImg8bit_trainvaltest.zip"),
-            "target_zip_path": Path(self.path, "gtFine_trainvaltest.zip"),
+            "img_suffix": ".png",  # Image file extension
+            "target_suffix": ".png",  # Mask file extension
+            "img_stem_suffix": "leftImg8bit",  # Image filename stem
+            "target_stem_suffix": "gtFine_labelIds",  # Mask filename stem
+            "zip_path": Path(
+                self.path, "leftImg8bit_trainvaltest.zip"
+            ),  # Path to images zip
+            "target_zip_path": Path(
+                self.path, "gtFine_trainvaltest.zip"
+            ),  # Path to masks zip
             "target_parser": lambda t, **kw: self.target_parser(
                 t, anomaly_label_id=254, **kw
-            ),
-            "check_empty_targets": self.check_empty_targets,
+            ),  # Function to parse masks
+            "check_empty_targets": self.check_empty_targets,  # Skip empty masks if True
         }
 
+        # Training dataset: uses DatasetWithCutPaste (no runtime augmentation, just a wrapper)
         self.cityscapes_train_dataset = DatasetWithCutPaste(
             transforms=train_transforms,
             img_folder_path_in_zip=Path("./leftImg8bit/train"),
@@ -173,15 +185,16 @@ class CityscapesSemanticCutPaste(LightningDataModule):
             **cityscapes_dataset_kwargs,
         )
 
+        # Validation dataset: standard Dataset (no augmentation)
         self.cityscapes_val_dataset = Dataset(
             img_folder_path_in_zip=Path("./leftImg8bit/val"),
             target_folder_path_in_zip=Path("./gtFine/val"),
             **cityscapes_dataset_kwargs,
         )
 
-        return self
+        return self  # Return self for chaining
 
-    def _create_train_transforms(self):
+    def _create_train_transforms(self):  # Returns the configured training transforms
         """
         Get transforms for training data.
 
@@ -190,7 +203,7 @@ class CityscapesSemanticCutPaste(LightningDataModule):
         """
         return self.transforms
 
-    def train_dataloader(self):
+    def train_dataloader(self):  # Returns DataLoader for training set
         """
         Create DataLoader for training set.
 
@@ -205,7 +218,7 @@ class CityscapesSemanticCutPaste(LightningDataModule):
             **self.dataloader_kwargs,  # batch_size, num_workers, etc.
         )
 
-    def val_dataloader(self):
+    def val_dataloader(self):  # Returns DataLoader for validation set
         """
         Create DataLoader for validation set.
 
@@ -230,84 +243,62 @@ class DatasetWithCutPaste(Dataset):
     """
 
     def __init__(self, **kwargs):
+        # Initialize parent Dataset with all arguments
         super().__init__(**kwargs)
 
     def __getitem__(self, index: int):
-        img, target = self._load_item(index)
+        # Loads a sample (image, mask), applies transforms, parses mask
+        img, target = self._load_item(index)  # Load raw image and mask
         if self.transforms is not None:
-            img, target = self.transforms(img, target)
-        masks, labels, is_crowd = self.target_parser(target)
-        return img, masks, labels, is_crowd
+            img, target = self.transforms(img, target)  # Apply transforms if present
+        masks, labels, is_crowd = self.target_parser(
+            target
+        )  # Parse mask into binary masks and labels
+        return img, masks, labels, is_crowd  # Return sample for training
 
     def _load_item(self, index: int):
-        """
-        Load raw image and target mask without any transforms.
-
-        Reads directly from zip files for efficient storage.
-
-        Args:
-            index: Sample index in the dataset.
-
-        Returns:
-            tuple: (image_tensor, target_mask) as raw tensors.
-        """
+        # Loads raw image and target mask from zip files (no transforms)
         import torch
         from PIL import Image
         from torchvision import tv_tensors
         from torchvision.transforms.v2 import functional as F
 
-        # Get file info for this sample
+        # Get file info for this sample (image and mask)
         img_info = self.imgs[index]
         target_info = self.targets[index]
 
-        # Load image from zip: convert to RGB, then to normalized float tensor
+        # Load image from zip: open file, convert to RGB, to tensor, normalize
         with self._get_zip().open(img_info.filename) as img_file:
             img = Image.open(img_file).convert("RGB")  # Ensure RGB format
-            img = F.to_image(img)  # Convert PIL to tensor
+            img = F.to_image(img)  # Convert PIL image to tensor
             img = F.to_dtype(img, torch.float32, scale=True)  # Normalize to [0, 1]
 
-        # Load target mask from zip: convert to Mask tensor
+        # Load target mask from zip: open file, convert to tensor mask
         target_zip = self._get_target_zip()
         with target_zip.open(target_info) as target_file:
-            target = Image.open(target_file)  # Load as PIL
-            target = tv_tensors.Mask(F.pil_to_tensor(target))  # Convert to Mask
+            target = Image.open(target_file)  # Load as PIL image
+            target = tv_tensors.Mask(F.pil_to_tensor(target))  # Convert to Mask tensor
 
-        return img, target
+        return img, target  # Return image and mask
 
     def _get_zip(self):
-        """
-        Get handle to image zip file (lazy initialization).
-
-        Uses lazy loading to avoid opening zip until first access.
-        Handles multi-worker data loading correctly.
-
-        Returns:
-            ZipFile: Open handle to image zip file.
-        """
+        # Returns handle to image zip file (lazy initialization, supports multi-worker)
         import zipfile
         from torch.utils.data import get_worker_info
 
-        # Check if we need to open the zip (first access or new worker)
-        worker_info = get_worker_info()
+        worker_info = get_worker_info()  # Check if running in multi-worker mode
         if worker_info is None or self.zip is None:
             if self.zip is None:
-                self.zip = zipfile.ZipFile(self.zip_path, "r")
+                self.zip = zipfile.ZipFile(
+                    self.zip_path, "r"
+                )  # Open zip if not already open
         return self.zip
 
     def _get_target_zip(self):
-        """
-        Get handle to target/label zip file (lazy initialization).
-
-        Similar to _get_zip but for segmentation masks.
-        Falls back to image zip if target_zip_path is not set.
-
-        Returns:
-            ZipFile: Open handle to target zip file.
-        """
+        # Returns handle to target/mask zip file (lazy initialization)
         import zipfile
         from torch.utils.data import get_worker_info
 
-        # Check if we need to open the zip
         worker_info = get_worker_info()
         if worker_info is None or self.target_zip is None:
             if self.target_zip is None:
