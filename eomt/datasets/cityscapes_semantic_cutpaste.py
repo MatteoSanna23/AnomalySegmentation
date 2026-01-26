@@ -36,7 +36,6 @@ from PIL import Image
 from datasets.lightning_data_module import LightningDataModule
 from datasets.dataset import Dataset
 from datasets.transforms import Transforms
-from cutpaste import CutPasteAugmentation
 
 
 # =============================================================================
@@ -98,17 +97,7 @@ class CityscapesSemanticCutPaste(LightningDataModule):
             img_size=img_size,
             check_empty_targets=check_empty_targets,
         )
-        self.save_hyperparameters(ignore=["_class_path"])  # Save for checkpointing
-
-        # Store cut-paste configuration
-        self.coco_ood_path = coco_ood_path
-        self.cutpaste_enabled = cutpaste_enabled
-        self.cutpaste_probability = cutpaste_probability
-        self.cutpaste_min_objects = cutpaste_min_objects
-        self.cutpaste_max_objects = cutpaste_max_objects
-        self.cutpaste_scale_range = cutpaste_scale_range
-        self.cutpaste_blend_mode = cutpaste_blend_mode
-        self.cutpaste_feather_radius = cutpaste_feather_radius
+        self.save_hyperparameters(ignore=["_class_path"])
 
         # Initialize image transforms (color jitter, random scale, etc.)
         self.transforms = Transforms(
@@ -116,24 +105,6 @@ class CityscapesSemanticCutPaste(LightningDataModule):
             color_jitter_enabled=color_jitter_enabled,
             scale_range=scale_range,
         )
-
-        # Initialize Cut-Paste augmentation module
-        self.cutpaste_aug = None
-        if cutpaste_enabled and coco_ood_path:
-            try:
-                self.cutpaste_aug = CutPasteAugmentation(
-                    coco_ood_path=coco_ood_path,
-                    apply_probability=cutpaste_probability,
-                    min_objects=cutpaste_min_objects,
-                    max_objects=cutpaste_max_objects,
-                    scale_range=cutpaste_scale_range,
-                    blend_mode=cutpaste_blend_mode,
-                    feather_radius=cutpaste_feather_radius,
-                )
-                print(f"Cut-Paste augmentation enabled (prob={cutpaste_probability})")
-            except Exception as e:
-                print(f"Warning: Could not initialize Cut-Paste: {e}")
-                self.cutpaste_aug = None
 
     @staticmethod
     def target_parser(target, anomaly_label_id: int = 254, **kwargs):
@@ -190,14 +161,13 @@ class CityscapesSemanticCutPaste(LightningDataModule):
             "zip_path": Path(self.path, "leftImg8bit_trainvaltest.zip"),
             "target_zip_path": Path(self.path, "gtFine_trainvaltest.zip"),
             "target_parser": lambda t, **kw: self.target_parser(
-                t, anomaly_label_id=CutPasteAugmentation.ANOMALY_LABEL_ID, **kw
+                t, anomaly_label_id=254, **kw
             ),
             "check_empty_targets": self.check_empty_targets,
         }
 
         self.cityscapes_train_dataset = DatasetWithCutPaste(
             transforms=train_transforms,
-            cutpaste_aug=self.cutpaste_aug,
             img_folder_path_in_zip=Path("./leftImg8bit/train"),
             target_folder_path_in_zip=Path("./gtFine/train"),
             **cityscapes_dataset_kwargs,
@@ -256,56 +226,17 @@ class CityscapesSemanticCutPaste(LightningDataModule):
 
 class DatasetWithCutPaste(Dataset):
     """
-    Dataset wrapper that applies Cut-Paste augmentation before standard transforms.
-
-    This class extends the base Dataset to intercept image loading and inject
-    Cut-Paste augmentation BEFORE other transforms (like color jitter, scaling).
-    This order is important because Cut-Paste works on raw images.
-
-    Processing Pipeline:
-        1. Load raw image and target from zip
-        2. Apply Cut-Paste augmentation (paste OOD objects, update mask)
-        3. Apply standard transforms (color jitter, scale, crop)
-        4. Parse target into per-class masks
+    Dataset wrapper for compatibility. No cut-paste augmentation applied.
     """
 
-    def __init__(self, cutpaste_aug: Optional[CutPasteAugmentation] = None, **kwargs):
-        """
-        Initialize the dataset with optional Cut-Paste augmentation.
-
-        Args:
-            cutpaste_aug: CutPasteAugmentation instance (or None to disable).
-            **kwargs: Arguments passed to parent Dataset class.
-        """
-        super().__init__(**kwargs)  # Initialize parent dataset
-        self.cutpaste_aug = cutpaste_aug  # Store augmentation module
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def __getitem__(self, index: int):
-        """
-        Get a training sample with Cut-Paste augmentation applied.
-
-        Overrides parent method to inject Cut-Paste before standard transforms.
-
-        Args:
-            index: Sample index in the dataset.
-
-        Returns:
-            tuple: (image, masks, labels, is_crowd) ready for training.
-        """
-        # Step 1: Load raw image and segmentation mask from zip
         img, target = self._load_item(index)
-
-        # Step 2: Apply Cut-Paste augmentation (if enabled)
-        if self.cutpaste_aug is not None:
-            img, target = self.cutpaste_aug(img, target)
-
-        # Step 3: Apply standard transforms (color jitter, random scale, crop)
         if self.transforms is not None:
             img, target = self.transforms(img, target)
-
-        # Step 4: Parse target mask into per-class binary masks
         masks, labels, is_crowd = self.target_parser(target)
-
         return img, masks, labels, is_crowd
 
     def _load_item(self, index: int):
