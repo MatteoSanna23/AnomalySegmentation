@@ -1,0 +1,65 @@
+# configs/dinov2/cityscapes/semantic/eomt_lora_cutpaste.yaml
+seed_everything: 42
+
+trainer:
+  max_epochs: 3  # CutPaste impara in fretta
+  check_val_every_n_epoch: 1
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  accumulate_grad_batches: 4
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        save_last: true
+        monitor: "val/mIoU"
+        mode: "max"
+        filename: "cutpaste-lora-{epoch:02d}-{val/mIoU:.2f}"
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: "eomt_cutpaste"
+      name: "lora_cutpaste_20classes"
+
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    img_size: [640, 640] # O 896 se la GPU regge
+    # num_classes: 20 (Viene inferito dal dataset, ma ricordalo: 19 + 1 anomalia)
+    
+    # Bilanciamento Loss: Peso 2.0 per l'anomalia (ultima classe)
+    class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0]
+
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            img_size: [640, 640]
+            backbone_name: vit_base_patch14_reg4_dinov2
+            patch_size: 16
+
+        # --- QUI INSERIAMO LORA ---
+        lora_config:
+          class_path: models.lora_integration.LoRAConfig
+          init_args:
+            enabled: true
+            rank: 8
+            target_modules: ["qkv", "proj", "fc1", "fc2"]
+            freeze_base_model: true
+
+data:
+  class_path: datasets.cityscapes_semantic_cutpaste.CityscapesSemanticCutPaste
+  init_args:
+    # Questi percorsi verranno sovrascritti dal tuo comando CLI, 
+    # ma è bene averne di default validi.
+    path: /teamspace/studios/this_studio/cityscapes_cutpaste
+    # anomaly_file: /path/to/coco.zip (Lo passiamo da CLI o lo metti qui)
+    num_workers: 4
+    batch_size: 2
+    img_size: [640, 640]
+    num_classes: 20
+    paste_prob: 0.5

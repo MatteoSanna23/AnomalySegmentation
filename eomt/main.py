@@ -6,13 +6,13 @@
 # used under the Apache 2.0 License.
 # ---------------------------------------------------------------
 
-
 import jsonargparse._typehints as _t
 from types import MethodType
 from gitignore_parser import parse_gitignore
 import logging
 import torch
 import warnings
+import os
 from lightning.pytorch import cli
 from lightning.pytorch.callbacks import ModelSummary, LearningRateMonitor
 from lightning.pytorch.loops.training_epoch_loop import _TrainingEpochLoop
@@ -22,21 +22,16 @@ from training.lightning_module import LightningModule
 from datasets.lightning_data_module import LightningDataModule
 
 # Suppress PyTorch FX warnings for DINOv3 models
-import os
 os.environ["TORCH_LOGS"] = "-dynamo"
 
-
 _orig_single = _t.raise_unexpected_value
-
 
 def _raise_single(*args, exception=None, **kwargs):
     if isinstance(exception, Exception):
         raise exception
     return _orig_single(*args, exception=exception, **kwargs)
 
-
 _orig_union = _t.raise_union_unexpected_value
-
 
 def _raise_union(subtypes, val, vals):
     for e in reversed(vals):
@@ -44,10 +39,8 @@ def _raise_union(subtypes, val, vals):
             raise e
     return _orig_union(subtypes, val, vals)
 
-
 _t.raise_unexpected_value = _raise_single
 _t.raise_union_unexpected_value = _raise_union
-
 
 def _should_check_val_fx(self: _TrainingEpochLoop, data_fetcher: _DataFetcher) -> bool:
     if not self._should_check_val_epoch():
@@ -74,13 +67,11 @@ def _should_check_val_fx(self: _TrainingEpochLoop, data_fetcher: _DataFetcher) -
                 self.batch_idx + 1
             ) % self.trainer.val_check_batch == 0
         else:
-            # added below to check val based on global steps instead of batches in case of iteration based val check and gradient accumulation
             is_val_check_batch = (
                 self.global_step
             ) % self.trainer.val_check_batch == 0 and not self._should_accumulate()
 
     return is_val_check_batch
-
 
 class LightningCLI(cli.LightningCLI):
     def __init__(self, *args, **kwargs):
@@ -88,58 +79,54 @@ class LightningCLI(cli.LightningCLI):
         torch.set_float32_matmul_precision("medium")
         torch._dynamo.config.capture_scalar_outputs = True
         torch._dynamo.config.suppress_errors = True
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*It is recommended to use .* when logging on epoch level in distributed setting to accumulate the metric across devices.*",
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r"^The ``compute`` method of metric PanopticQuality was called before the ``update`` method.*",
-        )
-        warnings.filterwarnings(
-            "ignore", message=r"^Grad strides do not match bucket view strides.*"
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*Detected call of `lr_scheduler\.step\(\)` before `optimizer\.step\(\)`.*",
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*functools.partial will be a method descriptor in future Python versions*",
-        )
-
+        warnings.filterwarnings("ignore")
         super().__init__(*args, **kwargs)
 
     def add_arguments_to_parser(self, parser):
         parser.add_argument("--compile_disabled", action="store_true")
-
-        parser.link_arguments(
-            "data.init_args.num_classes", "model.init_args.num_classes"
-        )
-        parser.link_arguments(
-            "data.init_args.num_classes",
-            "model.init_args.network.init_args.num_classes",
-        )
-
-        parser.link_arguments(
-            "data.init_args.stuff_classes", "model.init_args.stuff_classes"
-        )
-
+        parser.link_arguments("data.init_args.num_classes", "model.init_args.num_classes")
+        parser.link_arguments("data.init_args.num_classes", "model.init_args.network.init_args.num_classes")
+        parser.link_arguments("data.init_args.stuff_classes", "model.init_args.stuff_classes")
         parser.link_arguments("data.init_args.img_size", "model.init_args.img_size")
-        parser.link_arguments(
-            "data.init_args.img_size", "model.init_args.network.init_args.img_size"
-        )
-        parser.link_arguments(
-            "data.init_args.img_size",
-            "model.init_args.network.init_args.encoder.init_args.img_size",
-        )
-
-        parser.link_arguments(
-            "model.init_args.ckpt_path",
-            "model.init_args.network.init_args.encoder.init_args.ckpt_path",
-        )
+        parser.link_arguments("data.init_args.img_size", "model.init_args.network.init_args.img_size")
+        parser.link_arguments("data.init_args.img_size", "model.init_args.network.init_args.encoder.init_args.img_size")
+        # Rimosso il link automatico per ckpt_path per evitare conflitti nel caricamento manuale
+        # parser.link_arguments("model.init_args.ckpt_path", "model.init_args.network.init_args.encoder.init_args.ckpt_path")
 
     def fit(self, model, **kwargs):
+        # ------------------------------------------------------------------
+        # FIX PER IL FINE-TUNING + RESTORE EPOCH
+        # ------------------------------------------------------------------
+        ckpt_path = kwargs.get('ckpt_path')
+        
+        # Se stiamo usando il nostro checkpoint pulito (senza ottimizzatore)
+        if ckpt_path and "clean.ckpt" in str(ckpt_path):
+            print(f"\n🔄 MODE: FINE-TUNING (Detected 'clean.ckpt')")
+            print(f"   Caricamento pesi manuale da: {ckpt_path}")
+            
+            # 1. Carichiamo il file
+            checkpoint = torch.load(ckpt_path, map_location=model.device)
+            
+            # 2. Iniettiamo i pesi nel modello (strict=False permette flessibilità per LoRA)
+            keys = model.load_state_dict(checkpoint["state_dict"], strict=False)
+            print(f"   ✅ Pesi caricati! (Missing keys: {len(keys.missing_keys)}, Unexpected keys: {len(keys.unexpected_keys)})")
+            
+            # 3. Importante: Rimuoviamo ckpt_path dai kwargs
+            #    Questo impedisce al Trainer di provare a fare il "Resume" automatico
+            #    e permette di inizializzare un nuovo ottimizzatore fresco.
+            kwargs['ckpt_path'] = None
+
+            # 4. TRUCCO PER L'EPOCA: Impostiamo manualmente l'inizio
+            #    Diciamo a Lightning che 106 epoche sono già state completate.
+            #    Così il contatore partirà da 107 (Epoch 106 terminata -> Inizio Epoch 107).
+            self.trainer.fit_loop.epoch_progress.current.completed = 106
+            
+            # (Opzionale) Ripristina lo step globale se vuoi continuità nei grafici
+            # self.trainer.global_step = 19902 
+            
+            print(f"   ✅ Epoca forzata a: {self.trainer.current_epoch} (Start Epoch 107)")
+        # ------------------------------------------------------------------
+
         gitignore_path = ".gitignore"
         if os.path.exists(gitignore_path):
             is_gitignored = parse_gitignore(gitignore_path)
@@ -162,7 +149,6 @@ class LightningCLI(cli.LightningCLI):
 
         self.trainer.fit(model, **kwargs)
 
-
 def cli_main():
     LightningCLI(
         LightningModule,
@@ -183,7 +169,6 @@ def cli_main():
             "gradient_clip_algorithm": "norm",
         },
     )
-
 
 if __name__ == "__main__":
     cli_main()
