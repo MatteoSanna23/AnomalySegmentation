@@ -25,7 +25,7 @@ Usage:
 """
 
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 import torch
 from torch.utils.data import DataLoader, Dataset as TorchDataset
 from torchvision.datasets import Cityscapes
