@@ -26,8 +26,8 @@ class MaskClassificationLoss(Mask2FormerLoss):
         num_labels: int,
         no_object_coefficient: float,
         # --- ARCFACE PARAMS ---
-        arcface_s: float = 30.0,  # Scale factor (invece di 1/tau)
-        arcface_m: float = 0.50,  # Angular margin
+        arcface_s: float = 30.0,  # Scale factor, we multiply logits
+        arcface_m: float = 0.50,  # Angular margin, add this for improving class separation
     ):
         nn.Module.__init__(self)
         self.num_points = num_points
@@ -48,7 +48,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
         self.cos_m = math.cos(self.arcface_m)
         self.sin_m = math.sin(self.arcface_m)
         
-        # Threshold per stabilità numerica (Taylor expansion o clamp)
+        # Threshold for numerical stability (Taylor expansion or clamp)
         self.th = math.cos(math.pi - self.arcface_m)
         self.mm = math.sin(math.pi - self.arcface_m) * self.arcface_m
 
@@ -133,7 +133,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
     def loss_labels(self, class_queries_logits, class_labels, indices):
         """
-        Calcola la CrossEntropy Loss con implementazione ArcFace sui logit delle classi.
+        Compute the Cross Entropy Loss with ArcFace implementation on class logits.
         """
         idx = self._get_src_permutation_idx(indices)
 
@@ -141,10 +141,10 @@ class MaskClassificationLoss(Mask2FormerLoss):
             [t[J] for t, (_, J) in zip(class_labels, indices)]
         )
 
-        # Costruiamo il tensore dei target completo riempito con "no-object"
+        # Build the full target classes tensor filled with "no-object"
         target_classes = torch.full(
             class_queries_logits.shape[:2],
-            self.num_labels,  # indice no-object
+            self.num_labels,  #  no-object index
             dtype=torch.int64,
             device=class_queries_logits.device,
         )
@@ -153,70 +153,55 @@ class MaskClassificationLoss(Mask2FormerLoss):
         # -------------------------------
         # ARCFACE IMPLEMENTATION
         # -------------------------------
-        # 1. Separa classi reali [B, Q, K] e no-object [B, Q, 1]
-        #    ArcFace si applica solitamente per compattare le classi "In-Distribution".
-        #    Il no-object lo lasciamo "raw" o normalizzato ma senza margine.
+        # 1. Separate real classes [B, Q, K] and no-object [B, Q, 1]
+        # ArcFace is applied only to real classes. Leaving no-object "raw".
         
         class_logits = class_queries_logits[..., :-1]   # [B, Q, C]
         no_obj_logit = class_queries_logits[..., -1:]   # [B, Q, 1]
         
-        # 2. Normalizzazione L2 (Simula Cosine Similarity)
-        #    Assumiamo che class_logits ~ dot(feature, weight).
-        #    Normalizzando otteniamo cosine_theta.
+        # 2. Normalization L2 (Simulate Cosine Similarity)
+        #  in standard Softmax logits are computed as: logits = W * x * cosine_theta
+        #  normalizing dividing by ||x|| (feature norm) we get cosine similarity.
         eps = 1e-6
         norm = torch.norm(class_logits, p=2, dim=-1, keepdim=True)
         cosine = class_logits / torch.clamp(norm, min=eps)
 
-        # 3. Clamp per stabilità numerica di acos
-        cosine = torch.clamp(cosine, -1.0 + eps, 1.0 - eps)
+        # 3. Clamp for numerical stability of acos
+        cosine = torch.clamp(cosine, -1.0 + eps, 1.0 - eps) # between -1 and 1
 
-        # 4. Crea la maschera One-Hot per i target
-        #    Vogliamo applicare il margine m SOLO all'indice della classe vera (Ground Truth).
-        #    Attenzione: dobbiamo ignorare i target che sono "no-object" (indice == self.num_labels)
+        # 4. Create One-Hot mask for targets
+        #    We want to apply margin m ONLY to the true class index (Ground Truth).
+        #    Note: we must ignore targets that are "no-object" (index == self.num_labels)
         
-        # [B, Q] -> True dove c'è un oggetto assegnato
-        has_object_mask = target_classes < self.num_labels 
+        # [B, Q] -> True where there is an object assigned
+        has_object_mask = target_classes < self.num_labels
         
-        # One hot encoding solo per le posizioni dove c'è un oggetto
+        # One hot encoding only for positions where there is an object
         # Shape: [B, Q, C]
-        one_hot = torch.zeros_like(cosine)
+        one_hot = torch.zeros_like(cosine) 
         
-        # Scatteriamo 1.0 nelle posizioni delle classi target, ma solo per le righe che hanno un oggetto
-        # Usiamo idx (batch_idx, src_idx) calcolato prima dall'Hungarian Matcher
+        # Scatter 1.0 in the target class positions, but only for rows that have an object
+        # We use idx (batch_idx, src_idx) calculated earlier by the Hungarian Matcher
         if target_classes_o.numel() > 0:
-            # target_classes_o contiene gli indici delle classi (0..C-1)
+            # target_classes_o contains only valid class indices (no-object filtered out)
             one_hot[idx[0], idx[1], target_classes_o] = 1.0
 
-        # 5. Calcolo ArcFace: cos(theta + m)
+        # 5. Compute ArcFace: cos(theta + m)
         #    Formula: cos(a+b) = cos(a)cos(b) - sin(a)sin(b)
         sine = torch.sqrt(1.0 - torch.pow(cosine, 2))
+        phi = cosine * self.cos_m - sine * self.sin_m  
         
-        # cos(theta + m)
-        phi = cosine * self.cos_m - sine * self.sin_m
-        
-        # Gestione stabilità (Easy Margin o conditional replacement)
-        # Se theta + m > pi, la funzione decresce e poi cresce, rovinando l'ottimizzazione.
-        # Qui usiamo una versione semplificata: applichiamo phi solo dove one_hot è 1.
-        
-        if self.arcface_m > 0.0:
-            # Applichiamo il margine solo alla classe corretta
-            output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        # If theta + m > pi, the function decreases and then increases, ruining optimization.
+        if self.arcface_m > 0.0:    # if margin is set
+            output = (one_hot * phi) + ((1.0 - one_hot) * cosine) # apply phi (cos(theta + m)) only to true class
         else:
             output = cosine
 
         # 6. Scaling (s)
         output = output * self.arcface_s
 
-        # 7. Ricomposizione con no-object
-        #    Nota: Il no-object logit originale non è normalizzato.
-        #    Per essere coerenti, spesso si normalizza anche il no-object o lo si lascia
-        #    in una scala compatibile. Se il tuo modello è trainato da zero, il modello
-        #    imparerà a scalare il no-object per competere con 's'.
-        
-        # Opzione raccomandata per stabilità: non toccare no_obj_logit se non necessario,
-        # oppure applicare una scala simile. Qui lo lasciamo raw come nel codice originale,
-        # ma convertito in float per sicurezza.
-        
+        # 7. Recomposition with no-object (not normalized)
+        # [B, Q, C + 1], containing modified logits for real classes and raw no-object logit
         logits = torch.cat([output, no_obj_logit], dim=-1)
 
         # 8. Cross Entropy
@@ -229,6 +214,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
         return {"loss_cross_entropy": loss_ce}
 
+    # Function to get source permutation indices
     def _get_src_permutation_idx(self, indices):
         # indices: List[Tuple[src_idx, tgt_idx]]
         batch_idx = torch.cat(
