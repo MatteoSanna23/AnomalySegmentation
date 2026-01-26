@@ -986,10 +986,19 @@ class LightningModule(lightning.LightningModule):
                 missing_keys = [
                     key
                     for key in incompatible_keys.missing_keys
-                    if "class_head" not in key and "class_predictor" not in key
+                    if (
+                        "class_head" not in key
+                        and "class_predictor" not in key
+                        and "lora_a" not in key
+                        and "lora_b" not in key
+                    )
                 ]
             else:
-                missing_keys = incompatible_keys.missing_keys
+                missing_keys = [
+                    key
+                    for key in incompatible_keys.missing_keys
+                    if "lora_a" not in key and "lora_b" not in key
+                ]
             if missing_keys:
                 raise ValueError(f"Missing keys: {missing_keys}")
         if incompatible_keys.unexpected_keys:

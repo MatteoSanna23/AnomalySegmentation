@@ -37,14 +37,17 @@ model:
     criterion:
       class_path: training.mask_classification_loss_arcFace.MaskClassificationLoss
       init_args:
-        arcface_s: 30.0
-        arcface_m: 0.50
-        # I coefficienti standard per Mask2Former/EoMT
-        mask_coefficient: 5.0
-        dice_coefficient: 5.0
-        class_coefficient: 2.0
-        no_object_coefficient: 0.1
-    ckpt_path: /teamspace/studios/this_studio/epoch_106_patch16_resized_clean.ckpt
+        num_labels: 20              # <--- QUESTO RISOLVE L'ERRORE (19 classi + 1 anomalia)
+        num_points: 12544           # Obbligatorio
+        oversample_ratio: 3.0       # Obbligatorio
+        importance_sample_ratio: 0.75 # Obbligatorio
+        mask_coefficient: 5.0       # Obbligatorio
+        dice_coefficient: 5.0       # Obbligatorio
+        class_coefficient: 2.0      # Obbligatorio
+        no_object_coefficient: 0.1  # Obbligatorio
+        arcface_s: 30.0             # Parametro specifico ArcFace
+        arcface_m: 0.50             # Parametro specifico ArcFace
+    ckpt_path: /teamspace/studios/this_studio/AnomalySegmentation/eomt/6w549yeo/checkpoints/epoch=0-step=1487_lora.ckpt
 
     network:
       class_path: models.eomt.EoMT
