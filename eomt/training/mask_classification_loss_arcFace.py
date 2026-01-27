@@ -14,7 +14,7 @@ from transformers.models.mask2former.modeling_mask2former import (
 )
 import math
 
-class MaskClassificationLoss(Mask2FormerLoss):
+class MaskClassificationLossArcFace(Mask2FormerLoss):
     def __init__(
         self,
         num_points: int,

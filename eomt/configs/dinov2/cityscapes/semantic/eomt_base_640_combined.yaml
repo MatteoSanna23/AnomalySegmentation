@@ -1,0 +1,81 @@
+# =============================================================================
+# EoMT Base 640 Configuration: LoRA + ArcFace + CutPaste
+# =============================================================================
+# This config combines Low-Rank Adaptation (LoRA) for efficient training, 
+# ArcFace loss for better class separation, and CutPaste for anomaly detection.
+# =============================================================================
+
+trainer:
+  max_epochs: 10
+  accelerator: gpu
+  devices: 1
+  precision: "16-mixed"
+  accumulate_grad_batches: 4
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      resume: allow
+      project: "eomt"
+      name: "cityscapes_eomt_base_640_combined"
+
+model:
+  class_path: training.lightning_module.LightningModule
+  init_args:
+    ckpt_path: "/teamspace/studios/this_studio/ckpt/epoch_106-step_19902_eomt.ckpt"
+    img_size: [640, 640]
+    num_classes: 20  # 19 Cityscapes + 1 anomaly
+    load_ckpt_class_head: false # Reinitialize to 20 classes + 1 no-object
+    
+    # Custom ArcFace Loss
+    criterion:
+      class_path: training.mask_classification_loss_arcFace.MaskClassificationLossArcFace
+      init_args:
+        num_points: 12544
+        oversample_ratio: 3.0
+        importance_sample_ratio: 0.75
+        mask_coefficient: 20.0
+        dice_coefficient: 1.0
+        class_coefficient: 2.0
+        num_labels: 20
+        no_object_coefficient: 0.1
+        arcface_s: 30.0
+        arcface_m: 0.50
+
+    # Progressive Training Schedule
+    attn_mask_annealing_enabled: True
+    attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    attn_mask_annealing_end_steps: [6634, 11609, 16585]
+
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3
+        num_classes: 20
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_base_patch14_reg4_dinov2
+        
+        # LoRA Configuration
+        lora_config:
+          class_path: models.lora_integration.LoRAConfig
+          init_args:
+            enabled: true
+            rank: 8
+            lora_alpha: 16
+            lora_dropout: 0.1
+            target_modules: ["qkv", "proj", "fc1", "fc2"] # Target encoder blocks
+            freeze_base_model: true
+
+data:
+  class_path: datasets.cityscapes_semantic_cutpaste.CityscapesSemanticCutPaste
+  init_args:
+    path: "/teamspace/studios/this_studio/cityscapes_cutpaste"
+    original_cityscapes_path: "/teamspace/studios/this_studio/datasets"
+    num_workers: 4
+    batch_size: 2
+    img_size: [640, 640]
+    num_classes: 20
+    color_jitter_enabled: true
+    scale_range: [0.5, 2.0]

@@ -13,7 +13,11 @@
 # =============================================================================
 
 trainer:
-  max_epochs: 107
+  max_epochs: 3
+  accelerator: gpu
+  devices: 1
+  precision: "16-mixed"
+  accumulate_grad_batches: 4
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
@@ -22,11 +26,29 @@ trainer:
       name: "cityscapes_semantic_eomt_base_640_cutpaste"
 
 model:
-  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  class_path: training.lightning_module.LightningModule
   init_args:
+    # Checkpoint to load
+    ckpt_path: "/teamspace/studios/this_studio/ckpt/epoch_106-step_19902_eomt.ckpt"
+    
     # Image size and number of classes
     img_size: [640, 640]
     num_classes: 20  # 19 Cityscapes + 1 anomaly (class_head will have 21 cols with +1 no-object)
+    
+    # Configura la loss function qui
+    criterion:
+      class_path: training.mask_classification_loss_arcFace.MaskClassificationLossArcFace
+      init_args:
+        num_points: 12544
+        oversample_ratio: 3.0
+        importance_sample_ratio: 0.75
+        mask_coefficient: 20.0
+        dice_coefficient: 1.0
+        class_coefficient: 2.0
+        num_labels: 20  # 19 Cityscapes + 1 anomaly class (matches num_classes)
+        no_object_coefficient: 0.1
+        arcface_s: 30.0
+        arcface_m: 0.50
     
     # Attention mask annealing schedule for progressive training
     attn_mask_annealing_enabled: True
