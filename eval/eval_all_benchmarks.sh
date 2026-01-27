@@ -3,9 +3,9 @@
 # Configurazione percorsi
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #CKPT="../../epoch_106-step_19902_eomt.ckpt"
-CKPT="/teamspace/studios/this_studio/AML/checkpoints/eomt_6o1qopf2_checkpoints_epoch=2_step=1116_postArcFaceAndCOCO.ckpt"
+CKPT="/teamspace/studios/this_studio/AML/checkpoints/eomt_djsj53u4_all_checkpoints_epoch=9-step=3720.ckpt"
 BASE_PATH="/teamspace/studios/this_studio/AML/dataset_validation/Validation_Dataset"
-OUTPUT_FILE="/teamspace/studios/this_studio/AML/AnomalySegmentation/eval/final_summaries/final_summary_eomt_cut_paste.txt"
+OUTPUT_FILE="/teamspace/studios/this_studio/AML/AnomalySegmentation/eval/final_summaries/final_summary_eomt_all_combined.txt"
 
 echo "=== RISULTATI UNIVERSALI EO_MT ===" > $OUTPUT_FILE
 echo "Data esecuzione: $(date)" >> $OUTPUT_FILE
