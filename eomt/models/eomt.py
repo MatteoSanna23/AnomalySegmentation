@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import math
 
 from models.scale_block import ScaleBlock
+from models.lora_integration import LoRAConfig, apply_lora_to_vit
 
 
 class EoMT(nn.Module):
@@ -23,12 +24,14 @@ class EoMT(nn.Module):
         num_q,
         num_blocks=4,
         masked_attn_enabled=True,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.encoder = encoder
         self.num_q = num_q
         self.num_blocks = num_blocks
         self.masked_attn_enabled = masked_attn_enabled
+        self.lora_config = lora_config or LoRAConfig(enabled=False)
 
         self.register_buffer("attn_mask_probs", torch.ones(num_blocks))
 
@@ -51,6 +54,10 @@ class EoMT(nn.Module):
         self.upscale = nn.Sequential(
             *[ScaleBlock(self.encoder.backbone.embed_dim) for _ in range(num_upscale)],
         )
+
+        # Apply LoRA adaptation if enabled
+        if self.lora_config.enabled:
+            apply_lora_to_vit(self, self.lora_config)
 
     def _predict(self, x: torch.Tensor):
         q = x[:, : self.num_q, :]

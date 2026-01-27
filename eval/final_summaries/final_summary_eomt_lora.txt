@@ -1,0 +1,83 @@
+=== RISULTATI UNIVERSALI EO_MT ===
+Data esecuzione: Sun Jan 25 17:28:03 UTC 2026
+----------------------------------------------------------
+>>> DATASET: RoadAnomaly
+/home/zeus/miniconda3/envs/cloudspace/lib/python3.12/site-packages/ood_metrics/__init__.py:1: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Loading LoRA model from: /teamspace/studios/this_studio/AnomalySegmentation/eomt/6w549yeo/checkpoints/epoch=0-step=1487.ckpt
+Applying LoRA to targets: ['qkv', 'proj', 'fc1', 'fc2']
+Successfully applied LoRA to 48 layers.
+Freezing base model. Keeping trainable: LoRA layers + ['head', 'norm']
+Weights loaded. Missing: 0
+Processing: 24.jpgProcessing: 33.jpgProcessing: 0.jpgProcessing: 32.jpgProcessing: 6.jpgProcessing: 40.jpgProcessing: 49.jpgProcessing: 57.jpgProcessing: 8.jpgProcessing: 30.jpgProcessing: 9.jpgProcessing: 56.jpgProcessing: 47.jpgProcessing: 21.jpgProcessing: 50.jpgProcessing: 37.jpgProcessing: 2.jpgProcessing: 1.jpgProcessing: 38.jpgProcessing: 52.jpgProcessing: 58.jpgProcessing: 34.jpgProcessing: 13.jpgProcessing: 10.jpgProcessing: 18.jpgProcessing: 23.jpgProcessing: 22.jpgProcessing: 53.jpgProcessing: 29.jpgProcessing: 3.jpgProcessing: 44.jpgProcessing: 15.jpgProcessing: 20.jpgProcessing: 43.jpgProcessing: 25.jpgProcessing: 7.jpgProcessing: 36.jpgProcessing: 26.jpgProcessing: 19.jpgProcessing: 4.jpgProcessing: 51.jpgProcessing: 39.jpgProcessing: 17.jpgProcessing: 41.jpgProcessing: 27.jpgProcessing: 12.jpgProcessing: 16.jpgProcessing: 55.jpgProcessing: 5.jpgProcessing: 35.jpgProcessing: 14.jpgProcessing: 28.jpgProcessing: 42.jpgProcessing: 48.jpgProcessing: 31.jpgProcessing: 59.jpgProcessing: 54.jpgProcessing: 45.jpgProcessing: 46.jpgProcessing: 11.jpg
+
+--- RESULTS ---
+[MSP] FPR95: 82.18 | AUPRC: 15.36
+[MaxLogit] FPR95: 75.36 | AUPRC: 15.33
+[RbA] FPR95: 68.35 | AUPRC: 15.51
+Results saved to results_lora.txt
+----------------------------------------------------------
+>>> DATASET: RoadAnomaly21
+/home/zeus/miniconda3/envs/cloudspace/lib/python3.12/site-packages/ood_metrics/__init__.py:1: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Loading LoRA model from: /teamspace/studios/this_studio/AnomalySegmentation/eomt/6w549yeo/checkpoints/epoch=0-step=1487.ckpt
+Applying LoRA to targets: ['qkv', 'proj', 'fc1', 'fc2']
+Successfully applied LoRA to 48 layers.
+Freezing base model. Keeping trainable: LoRA layers + ['head', 'norm']
+Weights loaded. Missing: 0
+Processing: 2.pngProcessing: 1.pngProcessing: 6.pngProcessing: 4.pngProcessing: 0.pngProcessing: 9.pngProcessing: 7.pngProcessing: 8.pngProcessing: 3.pngProcessing: 5.png
+
+--- RESULTS ---
+[MSP] FPR95: 82.03 | AUPRC: 25.71
+[MaxLogit] FPR95: 71.03 | AUPRC: 25.76
+[RbA] FPR95: 70.90 | AUPRC: 25.88
+Results saved to results_lora.txt
+----------------------------------------------------------
+>>> DATASET: RoadObsticle21
+/home/zeus/miniconda3/envs/cloudspace/lib/python3.12/site-packages/ood_metrics/__init__.py:1: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Loading LoRA model from: /teamspace/studios/this_studio/AnomalySegmentation/eomt/6w549yeo/checkpoints/epoch=0-step=1487.ckpt
+Applying LoRA to targets: ['qkv', 'proj', 'fc1', 'fc2']
+Successfully applied LoRA to 48 layers.
+Freezing base model. Keeping trainable: LoRA layers + ['head', 'norm']
+Weights loaded. Missing: 0
+Processing: 16.webpProcessing: 19.webpProcessing: 27.webpProcessing: 3.webpProcessing: 1.webpProcessing: 2.webpProcessing: 4.webpProcessing: 26.webpProcessing: 9.webpProcessing: 14.webpProcessing: 5.webpProcessing: 12.webpProcessing: 17.webpProcessing: 20.webpProcessing: 11.webpProcessing: 10.webpProcessing: 6.webpProcessing: 8.webpProcessing: 22.webpProcessing: 0.webpProcessing: 7.webpProcessing: 23.webpProcessing: 18.webpProcessing: 25.webpProcessing: 21.webpProcessing: 13.webpProcessing: 28.webpProcessing: 29.webpProcessing: 15.webpProcessing: 24.webp
+
+--- RESULTS ---
+[MSP] FPR95: 14.58 | AUPRC: 20.77
+[MaxLogit] FPR95: 50.48 | AUPRC: 19.53
+[RbA] FPR95: 30.21 | AUPRC: 20.17
+Results saved to results_lora.txt
+----------------------------------------------------------
+>>> DATASET: FS_LostFound_full
+/home/zeus/miniconda3/envs/cloudspace/lib/python3.12/site-packages/ood_metrics/__init__.py:1: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Loading LoRA model from: /teamspace/studios/this_studio/AnomalySegmentation/eomt/6w549yeo/checkpoints/epoch=0-step=1487.ckpt
+Applying LoRA to targets: ['qkv', 'proj', 'fc1', 'fc2']
+Successfully applied LoRA to 48 layers.
+Freezing base model. Keeping trainable: LoRA layers + ['head', 'norm']
+Weights loaded. Missing: 0
+Processing: 81.pngProcessing: 25.pngProcessing: 60.pngProcessing: 91.pngProcessing: 62.pngProcessing: 19.pngProcessing: 82.pngProcessing: 98.pngProcessing: 29.pngProcessing: 58.pngProcessing: 79.pngProcessing: 80.pngProcessing: 66.pngProcessing: 94.pngProcessing: 27.pngProcessing: 55.pngProcessing: 42.pngProcessing: 12.pngProcessing: 2.pngProcessing: 1.pngProcessing: 72.pngProcessing: 49.pngProcessing: 74.pngProcessing: 6.pngProcessing: 68.pngProcessing: 76.pngProcessing: 75.pngProcessing: 46.pngProcessing: 92.pngProcessing: 71.pngProcessing: 38.pngProcessing: 20.pngProcessing: 4.pngProcessing: 70.pngProcessing: 89.pngProcessing: 48.pngProcessing: 56.pngProcessing: 37.pngProcessing: 69.pngProcessing: 33.pngProcessing: 0.pngProcessing: 10.pngProcessing: 9.pngProcessing: 32.pngProcessing: 39.pngProcessing: 54.pngProcessing: 34.pngProcessing: 40.pngProcessing: 11.pngProcessing: 30.pngProcessing: 95.pngProcessing: 41.pngProcessing: 45.pngProcessing: 86.pngProcessing: 15.pngProcessing: 7.pngProcessing: 8.pngProcessing: 26.pngProcessing: 64.pngProcessing: 87.pngProcessing: 22.pngProcessing: 78.pngProcessing: 73.pngProcessing: 35.pngProcessing: 61.pngProcessing: 44.pngProcessing: 53.pngProcessing: 67.pngProcessing: 23.pngProcessing: 3.pngProcessing: 47.pngProcessing: 50.pngProcessing: 96.pngProcessing: 84.pngProcessing: 18.pngProcessing: 14.pngProcessing: 31.pngProcessing: 88.pngProcessing: 90.pngProcessing: 59.pngProcessing: 36.pngProcessing: 93.pngProcessing: 52.pngProcessing: 43.pngProcessing: 63.pngProcessing: 17.pngProcessing: 83.pngProcessing: 99.pngProcessing: 57.pngProcessing: 21.pngProcessing: 65.pngProcessing: 97.pngProcessing: 28.pngProcessing: 5.pngProcessing: 16.pngProcessing: 13.pngProcessing: 85.pngProcessing: 77.pngProcessing: 51.pngProcessing: 24.png
+
+--- RESULTS ---
+[MSP] FPR95: 81.65 | AUPRC: 0.30
+[MaxLogit] FPR95: 86.87 | AUPRC: 0.30
+[RbA] FPR95: 65.45 | AUPRC: 0.33
+Results saved to results_lora.txt
+----------------------------------------------------------
+>>> DATASET: fs_static
+/home/zeus/miniconda3/envs/cloudspace/lib/python3.12/site-packages/ood_metrics/__init__.py:1: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Loading LoRA model from: /teamspace/studios/this_studio/AnomalySegmentation/eomt/6w549yeo/checkpoints/epoch=0-step=1487.ckpt
+Applying LoRA to targets: ['qkv', 'proj', 'fc1', 'fc2']
+Successfully applied LoRA to 48 layers.
+Freezing base model. Keeping trainable: LoRA layers + ['head', 'norm']
+Weights loaded. Missing: 0
+Processing: 24.jpgProcessing: 0.jpgProcessing: 6.jpgProcessing: 8.jpgProcessing: 9.jpgProcessing: 21.jpgProcessing: 2.jpgProcessing: 1.jpgProcessing: 13.jpgProcessing: 10.jpgProcessing: 18.jpgProcessing: 23.jpgProcessing: 22.jpgProcessing: 29.jpgProcessing: 3.jpgProcessing: 15.jpgProcessing: 20.jpgProcessing: 25.jpgProcessing: 7.jpgProcessing: 26.jpgProcessing: 19.jpgProcessing: 4.jpgProcessing: 17.jpgProcessing: 27.jpgProcessing: 12.jpgProcessing: 16.jpgProcessing: 5.jpgProcessing: 14.jpgProcessing: 28.jpgProcessing: 11.jpg
+
+--- RESULTS ---
+[MSP] FPR95: 96.56 | AUPRC: 2.30
+[MaxLogit] FPR95: 97.31 | AUPRC: 2.29
+[RbA] FPR95: 80.74 | AUPRC: 2.35
+Results saved to results_lora.txt
+----------------------------------------------------------

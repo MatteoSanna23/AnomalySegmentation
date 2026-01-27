@@ -14,6 +14,7 @@ import lightning
 from lightning.fabric.utilities import rank_zero_info
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torchmetrics.classification import MulticlassJaccardIndex
 from torchmetrics.detection import PanopticQuality, MeanAveragePrecision
@@ -49,16 +50,18 @@ class LightningModule(lightning.LightningModule):
         attn_mask_annealing_enabled: bool,
         attn_mask_annealing_start_steps: Optional[list[int]],
         attn_mask_annealing_end_steps: Optional[list[int]],
-        lr: float,
-        llrd: float,
-        llrd_l2_enabled: bool,
-        lr_mult: float,
-        weight_decay: float,
-        poly_power: float,
-        warmup_steps: tuple[int, int],
+        lr: float = 1e-4,
+        llrd: float = 0.9,
+        llrd_l2_enabled: bool = False,
+        lr_mult: float = 1.0,
+        weight_decay: float = 0.0,
+        poly_power: float = 0.9,
+        warmup_steps: tuple[int, int] = (1000, 1000),
         ckpt_path=None,
         delta_weights=False,
         load_ckpt_class_head=True,
+        criterion: Optional[nn.Module] = None,
+        ignore_idx: int = 255,
     ):
         super().__init__()
 
@@ -75,8 +78,15 @@ class LightningModule(lightning.LightningModule):
         self.poly_power = poly_power
         self.warmup_steps = warmup_steps
         self.llrd_l2_enabled = llrd_l2_enabled
+        self.criterion = criterion
+        self.ignore_idx = ignore_idx
 
         self.strict_loading = False
+
+        self.init_metrics_semantic(
+            ignore_idx,
+            self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1,
+        )
 
         if delta_weights and ckpt_path:
             logging.info("Delta weights mode")
@@ -97,23 +107,30 @@ class LightningModule(lightning.LightningModule):
             incompatible_keys = self.load_state_dict(ckpt, strict=False)
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
 
-        # --- PURIFICAZIONE FINALE DEI PARAMETRI ---
-        # Questo ciclo sostituisce fisicamente i contenitori complessi con nuovi Float32
+        # --- FINAL PARAMETER PURIFICATION ---
+        # This loop physically replaces any complex-type tensors with new Float32 parameters.
+        # Some checkpoints may contain complex numbers due to FFT operations or other causes.
+        # We ensure all parameters are real-valued floats for stable training.
         for name, module in self.network.named_modules():
             for param_name, param in module.named_parameters(recurse=False):
                 if torch.is_complex(param) or "complex" in str(param.dtype):
-                    print(
-                        f"Purificando parametro complesso in memoria: {name}.{param_name}"
-                    )
-                    new_data = param.data.real.detach().clone().float()
+                    # Convert complex tensor to real float32
+                    print(f"Purifying complex parameter in memory: {name}.{param_name}")
+                    new_data = (
+                        param.data.real.detach().clone().float()
+                    )  # Take real part
                     new_param = nn.Parameter(new_data)
-                    new_param.requires_grad = param.requires_grad
-                    setattr(module, param_name, new_param)
+                    new_param.requires_grad = param.requires_grad  # Preserve grad flag
+                    setattr(module, param_name, new_param)  # Replace parameter
                 else:
+                    # Ensure all parameters are float32
                     param.data = param.data.float()
-        # -------------------------------------------
+        # -----------------------------------------
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
+
+        if self.criterion is not None:
+            logging.info(f"{bold_green}Using loss function: {self.criterion.__class__.__name__}{reset}")
 
     def configure_optimizers(self):
         #! 1. FREEZE THE ENCODER
@@ -219,8 +236,42 @@ class LightningModule(lightning.LightningModule):
 
         return self.criterion.loss_total(losses_all_blocks, self.log)
 
+    def eval_step(
+        self,
+        batch,
+        batch_idx=None,
+        log_prefix=None,
+    ):
+        imgs, targets = batch
+
+        img_sizes = [img.shape[-2:] for img in imgs]
+        crops, origins = self.window_imgs_semantic(imgs)
+        mask_logits_per_layer, class_logits_per_layer = self(crops)
+
+        targets = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
+        for i, (mask_logits, class_logits) in enumerate(
+            list(zip(mask_logits_per_layer, class_logits_per_layer))
+        ):
+            mask_logits = F.interpolate(mask_logits, self.img_size, mode="bilinear")
+            crop_logits = self.to_per_pixel_logits_semantic(mask_logits, class_logits)
+            logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
+
+            self.update_metrics_semantic(logits, targets, i)
+
+            if batch_idx == 0:
+                self.plot_semantic(
+                    imgs[0], targets[0], logits[0], log_prefix, i, batch_idx
+                )
+
     def validation_step(self, batch, batch_idx=0):
         return self.eval_step(batch, batch_idx, "val")
+
+    def on_validation_epoch_end(self):
+        self._on_eval_epoch_end_semantic("val")
+
+    def on_validation_end(self):
+        self._on_eval_end_semantic("val")
 
     def mask_annealing(self, start_iter, current_iter, final_iter):
         device = self.device
@@ -905,18 +956,23 @@ class LightningModule(lightning.LightningModule):
         return summed
 
     def _load_ckpt(self, ckpt_path, load_ckpt_class_head):
+        """Load checkpoint and handle compatibility issues."""
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if "state_dict" in ckpt:
             ckpt = ckpt["state_dict"]
 
-        # --- AGGIUNTA: Forza tutto in float32 reale ---
+        # --- CONVERT TO REAL FLOAT32 ---
+        # Some checkpoints may have complex-valued tensors from FFT or other ops.
+        # Force all weights to be real float32 for stable training.
         ckpt = {
             k: v.real.float() if torch.is_complex(v) else v.float()
             for k, v in ckpt.items()
         }
-        # ----------------------------------------------
+        # --------------------------------
 
-        # --- AGGIUNTA: Interpola pos_embed se dimensione diversa ---
+        # --- INTERPOLATE POS_EMBED IF SIZE DIFFERS ---
+        # When training at different resolution (e.g., 640 vs 1024), the positional
+        # embeddings have different sizes. We interpolate to match current model.
         pos_embed_key = "network.encoder.backbone.pos_embed"
         if pos_embed_key in ckpt:
             ckpt_pos_embed = ckpt[pos_embed_key]
@@ -933,18 +989,19 @@ class LightningModule(lightning.LightningModule):
                 current_num_patches = current_pos_embed.shape[1]
                 embed_dim = ckpt_pos_embed.shape[2]
 
-                # Calcola grid size
+                # Calculate grid sizes (assume square grid)
                 ckpt_grid_size = int(ckpt_num_patches**0.5)
                 current_grid_size = int(current_num_patches**0.5)
 
-                # Reshape to grid, interpolate, reshape back
+                # Reshape to 2D grid for spatial interpolation
                 ckpt_pos_embed = ckpt_pos_embed.reshape(
                     1, ckpt_grid_size, ckpt_grid_size, embed_dim
                 )
                 ckpt_pos_embed = ckpt_pos_embed.permute(
                     0, 3, 1, 2
-                )  # [1, embed_dim, H, W]
+                )  # [1, embed_dim, H, W] for interpolation
 
+                # Bicubic interpolation to new grid size
                 interpolated = torch.nn.functional.interpolate(
                     ckpt_pos_embed,
                     size=(current_grid_size, current_grid_size),
@@ -952,12 +1009,13 @@ class LightningModule(lightning.LightningModule):
                     align_corners=False,
                 )
 
+                # Reshape back to [1, num_patches, embed_dim]
                 interpolated = interpolated.permute(0, 2, 3, 1)  # [1, H, W, embed_dim]
                 interpolated = interpolated.reshape(1, current_num_patches, embed_dim)
 
                 ckpt[pos_embed_key] = interpolated
                 logging.info(f"pos_embed interpolated successfully")
-        # -----------------------------------------------------------
+        # ----------------------------------------------
 
         ckpt = {k: v for k, v in ckpt.items() if "criterion.empty_weight" not in k}
         if not load_ckpt_class_head:
@@ -975,10 +1033,22 @@ class LightningModule(lightning.LightningModule):
                 missing_keys = [
                     key
                     for key in incompatible_keys.missing_keys
-                    if "class_head" not in key and "class_predictor" not in key
+                    if (
+                        "class_head" not in key
+                        and "class_predictor" not in key
+                        and "lora_a" not in key
+                        and "lora_b" not in key
+                        and "criterion" not in key
+                    )
                 ]
             else:
-                missing_keys = incompatible_keys.missing_keys
+                missing_keys = [
+                    key
+                    for key in incompatible_keys.missing_keys
+                    if "lora_a" not in key
+                    and "lora_b" not in key
+                    and "criterion" not in key
+                ]
             if missing_keys:
                 raise ValueError(f"Missing keys: {missing_keys}")
         if incompatible_keys.unexpected_keys:

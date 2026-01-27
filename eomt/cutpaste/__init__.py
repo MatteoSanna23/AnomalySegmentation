@@ -2,7 +2,7 @@
 # Cut-Paste Augmentation for Anomaly Segmentation
 # ---------------------------------------------------------------
 
-from .cutpaste_augmentation import CutPasteAugmentation
+from .generate_cutpaste_dataset import CutPasteGenerator
 from .download_coco import download_coco_subset
 
-__all__ = ["CutPasteAugmentation", "download_coco_subset"]
+__all__ = ["CutPasteGenerator", "download_coco_subset"]
