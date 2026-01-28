@@ -42,6 +42,11 @@ reset = "\033[0m"
 
 
 class LightningModule(lightning.LightningModule):
+    """
+    Main PyTorch Lightning module controlling the training loop, validation,
+    optimization, and logging.
+    """
+
     def __init__(
         self,
         network: nn.Module,
@@ -68,11 +73,14 @@ class LightningModule(lightning.LightningModule):
         self.network = network
         self.img_size = img_size
         self.num_classes = num_classes
+        # Parameters for Mask2Former-style attention mask annealing
         self.attn_mask_annealing_enabled = attn_mask_annealing_enabled
         self.attn_mask_annealing_start_steps = attn_mask_annealing_start_steps
         self.attn_mask_annealing_end_steps = attn_mask_annealing_end_steps
+
+        # Optimization hyperparameters
         self.lr = lr
-        self.llrd = llrd
+        self.llrd = llrd  # Layer-wise Learning Rate Decay factor
         self.lr_mult = lr_mult
         self.weight_decay = weight_decay
         self.poly_power = poly_power
@@ -83,57 +91,72 @@ class LightningModule(lightning.LightningModule):
 
         self.strict_loading = False
 
+        # Initialize IoU metrics for semantic segmentation
         self.init_metrics_semantic(
             ignore_idx,
             self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1,
         )
 
+        # --- CHECKPOINT LOADING LOGIC ---
+        # Handles complex scenarios like Delta Weights or partial loading
         if delta_weights and ckpt_path:
             logging.info("Delta weights mode")
+            # Initialize non-encoder weights to zero (for additive fine-tuning)
             self._zero_init_outside_encoder(skip_class_head=not load_ckpt_class_head)
             current_state_dict = {k: v.cpu() for k, v in self.state_dict().items()}
+
+            # Filter out class head if we are changing the number of classes
             if not load_ckpt_class_head:
                 current_state_dict = {
                     k: v
                     for k, v in current_state_dict.items()
                     if "class_head" not in k and "class_predictor" not in k
                 }
+
             ckpt = self._load_ckpt(ckpt_path, load_ckpt_class_head)
             combined_state_dict = self._add_state_dicts(current_state_dict, ckpt)
             incompatible_keys = self.load_state_dict(combined_state_dict, strict=False)
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
         elif ckpt_path:
+            # Standard checkpoint loading
             ckpt = self._load_ckpt(ckpt_path, load_ckpt_class_head)
             incompatible_keys = self.load_state_dict(ckpt, strict=False)
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
 
         # --- FINAL PARAMETER PURIFICATION ---
-        # This loop physically replaces any complex-type tensors with new Float32 parameters.
-        # Some checkpoints may contain complex numbers due to FFT operations or other causes.
-        # We ensure all parameters are real-valued floats for stable training.
+        # Some pretrained ViT checkpoints (like DINOv2) might contain ComplexFloat parameters
+        # related to RoPE or FFTs. We convert them to standard Float32 to ensure
+        # stability during training and optimizer steps.
         for name, module in self.network.named_modules():
             for param_name, param in module.named_parameters(recurse=False):
                 if torch.is_complex(param) or "complex" in str(param.dtype):
-                    # Convert complex tensor to real float32
                     print(f"Purifying complex parameter in memory: {name}.{param_name}")
                     new_data = (
                         param.data.real.detach().clone().float()
-                    )  # Take real part
+                    )  # Keep only the real part
                     new_param = nn.Parameter(new_data)
-                    new_param.requires_grad = param.requires_grad  # Preserve grad flag
-                    setattr(module, param_name, new_param)  # Replace parameter
+                    new_param.requires_grad = param.requires_grad
+                    setattr(module, param_name, new_param)
                 else:
-                    # Ensure all parameters are float32
                     param.data = param.data.float()
         # -----------------------------------------
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
         if self.criterion is not None:
-            logging.info(f"{bold_green}Using loss function: {self.criterion.__class__.__name__}{reset}")
+            logging.info(
+                f"{bold_green}Using loss function: {self.criterion.__class__.__name__}{reset}"
+            )
 
     def configure_optimizers(self):
-        #! 1. FREEZE THE ENCODER
+        """
+        Sets up the optimizer and scheduler.
+        Crucial logic:
+        1. Freezes the encoder (Backbone) to support LoRA/Transfer learning.
+        2. Applies Layer-wise Learning Rate Decay (LLRD) to backbone layers if they are unfrozen.
+        """
+
+        # 1. Force freeze the encoder backbone
         for param in self.network.encoder.parameters():
             param.requires_grad = False
 
@@ -144,27 +167,32 @@ class LightningModule(lightning.LightningModule):
         other_param_groups = []
         backbone_blocks = len(self.network.encoder.backbone.blocks)
 
+        # Identify which blocks are involved in L2 regularization/decay
         l2_blocks = torch.arange(
             backbone_blocks - self.network.num_blocks, backbone_blocks
         ).tolist()
 
-        #! 2. ASSEGNAZIONE LR E FILTRO PARAMETRI ATTIVI
-        # Iteriamo su tutti i parametri del modello
+        # 2. Iterate through all parameters to assign specific learning rates
         for name, param in reversed(list(self.named_parameters())):
-            # Se il parametro è freezato (encoder), lo saltiamo completamente
+            # Skip frozen parameters (like the base weights in LoRA)
             if not param.requires_grad:
                 continue
 
             lr = self.lr
+
+            # Handle Backbone Parameters (if any are unfrozen)
             if name.replace("network.encoder.backbone.", "") in encoder_param_names:
                 name_list = name.split(".")
                 is_block = False
                 block_i = backbone_blocks
+
+                # Determine block index for LLRD
                 for i, key in enumerate(name_list):
                     if key == "blocks":
                         block_i = int(name_list[i + 1])
                         is_block = True
 
+                # Apply geometric decay to learning rate based on depth
                 if is_block or block_i == 0:
                     lr *= self.llrd ** (backbone_blocks - 1 - block_i)
                 elif (is_block or block_i == 0) and self.lr_mult != 1.0:
@@ -184,14 +212,15 @@ class LightningModule(lightning.LightningModule):
                     {"params": [param], "lr": lr, "name": name}
                 )
             else:
+                # Handle Head/Decoder/LoRA Parameters
                 other_param_groups.append(
                     {"params": [param], "lr": self.lr, "name": name}
                 )
 
         param_groups = backbone_param_groups + other_param_groups
 
-        #! 3. CREAZIONE OTTIMIZZATORE UNICO (CON FIX FOREACH)
-        # Importante: foreach=False impedisce il crash con i tipi ComplexFloat
+        # 3. Initialize Optimizer
+        # foreach=False avoids issues with complex tensors if any remain
         optimizer = AdamW(param_groups, weight_decay=self.weight_decay, foreach=False)
 
         scheduler = TwoStageWarmupPolySchedule(
@@ -212,16 +241,21 @@ class LightningModule(lightning.LightningModule):
         }
 
     def forward(self, imgs):
+        """Standard forward pass with input normalization."""
         x = imgs / 255.0
-
         return self.network(x)
 
     def training_step(self, batch, batch_idx):
+        """
+        Executes one training step.
+        Calculates loss for the final output and auxiliary losses for intermediate blocks.
+        """
         imgs, targets = batch
 
         mask_logits_per_block, class_logits_per_block = self(imgs)
 
         losses_all_blocks = {}
+        # Iterate over outputs from all decoder blocks (deep supervision)
         for i, (mask_logits, class_logits) in enumerate(
             list(zip(mask_logits_per_block, class_logits_per_block))
         ):
@@ -242,23 +276,40 @@ class LightningModule(lightning.LightningModule):
         batch_idx=None,
         log_prefix=None,
     ):
+        """
+        Shared evaluation logic for Validation and Testing.
+        Performs sliding window inference to handle high-resolution images.
+        """
+
         imgs, targets = batch
 
         img_sizes = [img.shape[-2:] for img in imgs]
+
+        # 1. Create crops (sliding window)
         crops, origins = self.window_imgs_semantic(imgs)
+
+        # 2. Run inference on crops
         mask_logits_per_layer, class_logits_per_layer = self(crops)
 
         targets = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
 
+        # 3. Stitch predictions back to full image size
         for i, (mask_logits, class_logits) in enumerate(
             list(zip(mask_logits_per_layer, class_logits_per_layer))
         ):
+            # Resize mask logits to match the crop size
             mask_logits = F.interpolate(mask_logits, self.img_size, mode="bilinear")
+
+            # Convert mask/class logits to per-pixel probabilities
             crop_logits = self.to_per_pixel_logits_semantic(mask_logits, class_logits)
+
+            # Reconstruct full image logits from crops
             logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
 
+            # Update metrics (IoU)
             self.update_metrics_semantic(logits, targets, i)
 
+            # Visualize the first batch for debugging
             if batch_idx == 0:
                 self.plot_semantic(
                     imgs[0], targets[0], logits[0], log_prefix, i, batch_idx
@@ -274,6 +325,11 @@ class LightningModule(lightning.LightningModule):
         self._on_eval_end_semantic("val")
 
     def mask_annealing(self, start_iter, current_iter, final_iter):
+        """
+        Mask2Former strategy: Gradually transition from global attention (mask=1)
+        to local masked attention (mask=0) based on training progress.
+        """
+
         device = self.device
         dtype = self.network.attn_mask_probs[0].dtype
         if current_iter < start_iter:
@@ -292,6 +348,7 @@ class LightningModule(lightning.LightningModule):
         batch_idx=None,
         dataloader_idx=None,
     ):
+        """Updates the attention mask probability at the end of every step."""
         if self.attn_mask_annealing_enabled:
             for i in range(self.network.num_blocks):
                 self.network.attn_mask_probs[i] = self.mask_annealing(
@@ -308,6 +365,7 @@ class LightningModule(lightning.LightningModule):
                 )
 
     def init_metrics_semantic(self, ignore_idx, num_blocks):
+        """Initializes IoU metrics for each decoder block."""
         self.metrics = nn.ModuleList(
             [
                 MulticlassJaccardIndex(
@@ -365,6 +423,7 @@ class LightningModule(lightning.LightningModule):
         is_crowds: list[torch.Tensor],
         block_idx,
     ):
+        """Complex metric calculation for Panoptic Quality (PQ)."""
         for i in range(len(preds)):
             metric = self.metrics[block_idx]
             flatten_pred = _prepocess_inputs(
@@ -470,6 +529,7 @@ class LightningModule(lightning.LightningModule):
         )
 
     def _on_eval_epoch_end_semantic(self, log_prefix, log_per_class=False):
+        """Aggregates and logs Semantic Segmentation metrics (mIoU)."""
         for i, metric in enumerate(self.metrics):  # type: ignore
             iou_per_class = metric.compute()
             metric.reset()
@@ -489,6 +549,7 @@ class LightningModule(lightning.LightningModule):
             )
 
     def _on_eval_epoch_end_instance(self, log_prefix):
+        """Aggregates and logs Instance Segmentation metrics (mAP)."""
         for i, metric in enumerate(self.metrics):  # type: ignore
             results = metric.compute()
             metric.reset()
@@ -520,6 +581,7 @@ class LightningModule(lightning.LightningModule):
             )
 
     def _on_eval_epoch_end_panoptic(self, log_prefix, log_per_class=False):
+        """Aggregates and logs Panoptic Quality metrics."""
         for i, metric in enumerate(self.metrics):  # type: ignore
             result = metric.compute()[:-1]
             metric.reset()
@@ -620,8 +682,13 @@ class LightningModule(lightning.LightningModule):
         batch_idx,
         cmap="tab20",
     ):
+        """
+        Visualizes the segmentation results (Input, Ground Truth, Prediction)
+        and logs them to Weights & Biases (WandB).
+        """
         fig, axes = plt.subplots(1, 3, figsize=[15, 5], sharex=True, sharey=True)
 
+        # Plot Input Image
         axes[0].imshow(img.cpu().numpy().transpose(1, 2, 0))
         axes[0].axis("off")
 
@@ -634,12 +701,14 @@ class LightningModule(lightning.LightningModule):
         num_classes = len(unique_classes)
         colors = plt.get_cmap(cmap, num_classes)(np.linspace(0, 1, num_classes))  # type: ignore
 
+        # Handle Ignore Index (usually paint it black)
         if self.ignore_idx in unique_classes:
             colors[unique_classes == self.ignore_idx] = [0, 0, 0, 1]  # type: ignore
 
         custom_cmap = mcolors.ListedColormap(colors)  # type: ignore
         norm = mcolors.Normalize(0, num_classes - 1)
 
+        # Plot Ground Truth
         axes[1].imshow(
             np.digitize(target, unique_classes) - 1,
             cmap=custom_cmap,
@@ -648,6 +717,7 @@ class LightningModule(lightning.LightningModule):
         )
         axes[1].axis("off")
 
+        # Plot Prediction
         if preds is not None:
             axes[2].imshow(
                 np.digitize(preds, unique_classes, right=True),
@@ -657,6 +727,7 @@ class LightningModule(lightning.LightningModule):
             )
             axes[2].axis("off")
 
+        # Create Legend
         patches = [
             Line2D([0], [0], color=colors[i], lw=4, label=str(unique_classes[i]))
             for i in range(num_classes)
@@ -664,6 +735,7 @@ class LightningModule(lightning.LightningModule):
 
         fig.legend(handles=patches, loc="upper left")
 
+        # Save to buffer and log
         buf = io.BytesIO()
         plt.tight_layout()
         plt.savefig(buf, facecolor="black")
@@ -676,6 +748,7 @@ class LightningModule(lightning.LightningModule):
 
     @torch.compiler.disable
     def scale_img_size_semantic(self, size: tuple[int, int]):
+        """Helper to compute scaling factor ensuring image fits within self.img_size."""
         factor = max(
             self.img_size[0] / size[0],
             self.img_size[1] / size[1],
@@ -685,10 +758,15 @@ class LightningModule(lightning.LightningModule):
 
     @torch.compiler.disable
     def window_imgs_semantic(self, imgs):
+        """
+        Splits a large image into overlapping crops (windows) for inference.
+        Necessary when image resolution > model input resolution.
+        """
         crops, origins = [], []
 
         for i in range(len(imgs)):
             img = imgs[i]
+            # Resize image to target scale
             new_h, new_w = self.scale_img_size_semantic(img.shape[-2:])
             pil_img = Image.fromarray(img.permute(1, 2, 0).cpu().numpy())
             resized_img = pil_img.resize((new_w, new_h), Image.BILINEAR)
@@ -696,10 +774,12 @@ class LightningModule(lightning.LightningModule):
                 torch.from_numpy(np.array(resized_img)).permute(2, 0, 1).to(img.device)
             )
 
+            # Calculate number of crops
             num_crops = math.ceil(max(resized_img.shape[-2:]) / min(self.img_size))
             overlap = num_crops * min(self.img_size) - max(resized_img.shape[-2:])
             overlap_per_crop = (overlap / (num_crops - 1)) if overlap > 0 else 0
 
+            # Create crops
             for j in range(num_crops):
                 start = int(j * (min(self.img_size) - overlap_per_crop))
                 end = start + min(self.img_size)
@@ -714,6 +794,10 @@ class LightningModule(lightning.LightningModule):
         return torch.stack(crops), origins
 
     def revert_window_logits_semantic(self, crop_logits, origins, img_sizes):
+        """
+        Recombines predictions from overlapping crops into the original image space.
+        Uses a 'count' buffer to average predictions in overlapping regions.
+        """
         logit_sums, logit_counts = [], []
         for size in img_sizes:
             h, w = self.scale_img_size_semantic(size)
@@ -745,6 +829,10 @@ class LightningModule(lightning.LightningModule):
     def to_per_pixel_logits_semantic(
         mask_logits: torch.Tensor, class_logits: torch.Tensor
     ):
+        """
+        Converts Mask2Former outputs (mask logits + class logits) into standard
+        per-pixel semantic segmentation maps via Einstein summation.
+        """
         return torch.einsum(
             "bqhw, bqc -> bchw",
             mask_logits.sigmoid(),
@@ -757,6 +845,7 @@ class LightningModule(lightning.LightningModule):
         targets: list[dict],
         ignore_idx,
     ):
+        """Converts mask-based targets into per-pixel semantic labels."""
         per_pixel_targets = []
         for target in targets:
             per_pixel_target = torch.full(
@@ -824,6 +913,7 @@ class LightningModule(lightning.LightningModule):
     def to_per_pixel_preds_panoptic(
         self, mask_logits_list, class_logits, stuff_classes, mask_thresh, overlap_thresh
     ):
+        """Converts model outputs to Panoptic Segmentation format."""
         scores, classes = class_logits.softmax(dim=-1).max(-1)
         preds_list = []
 
@@ -922,6 +1012,7 @@ class LightningModule(lightning.LightningModule):
     def _zero_init_outside_encoder(
         self, encoder_prefix="network.encoder.", skip_class_head=False
     ):
+        """Zero-initializes weights outside the backbone (typically for delta training)."""
         with torch.no_grad():
             total, zeroed = 0, 0
             for name, p in self.named_parameters():
@@ -956,14 +1047,19 @@ class LightningModule(lightning.LightningModule):
         return summed
 
     def _load_ckpt(self, ckpt_path, load_ckpt_class_head):
-        """Load checkpoint and handle compatibility issues."""
+        """
+        Loads a checkpoint with advanced handling for:
+        1. Complex float conversion.
+        2. Resolution mismatch (Position Embedding interpolation).
+        3. Class head filtering.
+        """
+
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if "state_dict" in ckpt:
             ckpt = ckpt["state_dict"]
 
         # --- CONVERT TO REAL FLOAT32 ---
-        # Some checkpoints may have complex-valued tensors from FFT or other ops.
-        # Force all weights to be real float32 for stable training.
+        # Handles complex-valued tensors from FFTs in specific pre-trained models
         ckpt = {
             k: v.real.float() if torch.is_complex(v) else v.float()
             for k, v in ckpt.items()
@@ -971,8 +1067,8 @@ class LightningModule(lightning.LightningModule):
         # --------------------------------
 
         # --- INTERPOLATE POS_EMBED IF SIZE DIFFERS ---
-        # When training at different resolution (e.g., 640 vs 1024), the positional
-        # embeddings have different sizes. We interpolate to match current model.
+        # Critical when fine-tuning at a resolution different from pre-training.
+        # We perform bicubic interpolation on the positional embedding grid.
         pos_embed_key = "network.encoder.backbone.pos_embed"
         if pos_embed_key in ckpt:
             ckpt_pos_embed = ckpt[pos_embed_key]
@@ -1028,6 +1124,7 @@ class LightningModule(lightning.LightningModule):
         return ckpt
 
     def _raise_on_incompatible(self, incompatible_keys, load_ckpt_class_head):
+        """Helper to check strict loading compliance."""
         if incompatible_keys.missing_keys:
             if not load_ckpt_class_head:
                 missing_keys = [

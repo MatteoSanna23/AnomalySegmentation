@@ -14,18 +14,14 @@ import math
 
 
 class LoRALinear(nn.Module):
-    """Linear layer with LoRA (Low-Rank Adaptation) adaptation.
+    """
+    A Linear layer wrapped with Low-Rank Adaptation (LoRA).
 
-    Replaces a frozen linear layer with LoRA adaptation:
-    output = W_0 @ x + (α/r) * (B @ A) @ x
-    where A and B are trainable low-rank matrices.
+    Instead of fine-tuning the massive pre-trained weight matrix W,
+    we inject two small trainable matrices A and B such that:
+    W_new = W_old + (B @ A) * scaling
 
-    Args:
-        in_features: Size of input features
-        out_features: Size of output features
-        rank: Rank of the LoRA adaptation matrices
-        lora_alpha: Scaling factor for LoRA output
-        lora_dropout: Dropout probability for LoRA
+    This drastically reduces the number of trainable parameters.
     """
 
     def __init__(
@@ -36,6 +32,15 @@ class LoRALinear(nn.Module):
         lora_alpha: int = 16,
         lora_dropout: float = 0.1,
     ):
+        """
+        Args:
+            in_features: Input dimension.
+            out_features: Output dimension.
+            rank: The inner dimension of matrices A and B. Lower rank = fewer params.
+            lora_alpha: Scaling constant. The update is scaled by (alpha / rank).
+                        This allows changing 'rank' without retuning learning rates.
+            lora_dropout: Dropout probability applied to the input of the LoRA path.
+        """
         super().__init__()
 
         self.in_features = in_features
@@ -44,55 +49,67 @@ class LoRALinear(nn.Module):
         self.lora_alpha = lora_alpha
         self.scaling = lora_alpha / rank
 
-        # Original weights (frozen)
+        # Original weights (frozen backbone)
+        # We store them as parameters but will typically set requires_grad=False externally
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.empty(out_features)) if True else None
 
-        # LoRA parameters: output = W_0 @ x + (α/r) * B @ A @ x
+        # LoRA trainable parameters: The "update" matrices
+        # Shape: A is (in, rank), B is (rank, out)
         self.lora_a = nn.Parameter(torch.empty(in_features, rank))
         self.lora_b = nn.Parameter(torch.empty(rank, out_features))
 
-        # Dropout for LoRA
+        # Dropout for regularization during training
         self.lora_dropout = nn.Dropout(p=lora_dropout)
 
         # Initialize parameters
         self._reset_parameters()
 
     def _reset_parameters(self):
-        """Initialize weights following the LoRA paper."""
+        """
+        Initialize weights.
+        Crucial Detail:
+          - lora_a is initialized with a random distribution.
+          - lora_b is initialized to ZEROS.
+
+        Why? This ensures that at step 0, (B @ A) is zero.
+        The model starts exactly as the pre-trained model, preventing instability.
+        """
+        # Standard initialization for the base layer
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
-        # Initialize A with normal distribution, B with zeros
+        # LoRA specific initialization
         nn.init.normal_(self.lora_a, std=1 / self.rank)
         nn.init.zeros_(self.lora_b)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with original weights + LoRA adaptation.
-
-        Args:
-            x: Input tensor of shape (..., in_features)
-
-        Returns:
-            Output tensor of shape (..., out_features)
         """
-        # Standard forward pass
+        Forward pass adding the LoRA adaptation term.
+
+        Formula:
+            Output = (W_base @ x) + (scaling * B @ A @ Dropout(x))
+        """
+
+        # 1. Compute output using the frozen pre-trained weights
         out = torch.nn.functional.linear(x, self.weight, self.bias)
 
-        # LoRA adaptation
+        # 2. Compute the low-rank update (the "adapter" path)
         lora_out = self.lora_dropout(x) @ self.lora_a @ self.lora_b
         lora_out = lora_out * self.scaling
 
+        # 3. Sum them up
         return out + lora_out
 
 
 class LoRAAttention(nn.Module):
-    """LoRA adaptation for attention layers.
-
-    Applies LoRA to the Q, K, V projection layers in multi-head attention.
+    """
+    A helper module to apply LoRA specifically to Attention Q, K, V projections.
+    Usually used if you are modifying an Attention block definition directly
+    rather than replacing Linear layers genericallly.
     """
 
     def __init__(
@@ -101,7 +118,7 @@ class LoRAAttention(nn.Module):
         rank: int = 8,
         lora_alpha: int = 16,
         lora_dropout: float = 0.1,
-        target: str = "all",  # "q", "k", "v", or "all"
+        target: str = "all",  # Which projections to adapt: "q", "k", "v", or "all"
     ):
         super().__init__()
 
@@ -111,11 +128,12 @@ class LoRAAttention(nn.Module):
         self.lora_dropout = lora_dropout
         self.target = target
 
-        # LoRA for Q, K, V projections
+        # Determine which components get adapters
         self.use_q = target in ["q", "all"]
         self.use_k = target in ["k", "all"]
         self.use_v = target in ["v", "all"]
 
+        # Initialize distinct LoRA matrices for each target (Q, K, V)
         if self.use_q:
             self.lora_q_a = nn.Parameter(torch.empty(in_features, rank))
             self.lora_q_b = nn.Parameter(torch.empty(rank, in_features))
@@ -140,21 +158,14 @@ class LoRAAttention(nn.Module):
     def apply_lora(
         self, x: torch.Tensor, lora_a: nn.Parameter, lora_b: nn.Parameter
     ) -> torch.Tensor:
-        """Apply LoRA adaptation to a tensor."""
+        """Helper to compute the (B @ A @ x) term."""
         return self.dropout(x) @ lora_a @ lora_b * self.scaling
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Apply LoRA to Q, K, V tensors.
-
-        Args:
-            q: Query tensor
-            k: Key tensor
-            v: Value tensor
-
-        Returns:
-            Tuple of (q + lora_q, k + lora_k, v + lora_v)
+        """
+        Receives original Q, K, V tensors and adds the LoRA update to them.
         """
         if self.use_q:
             q = q + self.apply_lora(q, self.lora_q_a, self.lora_q_b)
@@ -175,21 +186,23 @@ def replace_linear_with_lora(
     lora_dropout: float = 0.1,
     target_modules: Optional[list[str]] = None,
 ) -> None:
-    """Replace Linear layers in a module with LoRA layers.
+    """
+    Recursively replaces `nn.Linear` layers in a model with `LoRALinear`.
+
+    This allows injecting LoRA into an existing standard PyTorch model without
+    rewriting the model class definition.
 
     Args:
-        module: The module to apply LoRA to
-        rank: Rank of LoRA adaptation
-        lora_alpha: Scaling factor
-        lora_dropout: Dropout probability
-        target_modules: List of module names to replace (e.g., ["mlp.fc1", "mlp.fc2"])
-                       If None, replaces all Linear layers
+        module: The root module (e.g., the whole ViT or a specific block).
+        target_modules: List of specific names (e.g., 'qkv', 'fc1') to target.
+                        If None, it blindly replaces ALL linear layers (use with caution).
     """
 
     if target_modules is None:
-        # Replace all Linear layers
+        # Strategy 1: Replace ALL Linear layers found recursively
         for name, child in module.named_children():
             if isinstance(child, nn.Linear):
+                # Instantiate replacement
                 lora_linear = LoRALinear(
                     child.in_features,
                     child.out_features,
@@ -197,14 +210,15 @@ def replace_linear_with_lora(
                     lora_alpha=lora_alpha,
                     lora_dropout=lora_dropout,
                 )
-                # Copy original weights
+                # Transfer weights
                 lora_linear.weight.data.copy_(child.weight.data)
                 if child.bias is not None:
                     lora_linear.bias.data.copy_(child.bias.data)
 
+                # Swap the layer
                 setattr(module, name, lora_linear)
             else:
-                # Recursively apply to children
+                # Recurse deeper
                 replace_linear_with_lora(
                     child,
                     rank=rank,
@@ -213,8 +227,11 @@ def replace_linear_with_lora(
                     target_modules=target_modules,
                 )
     else:
-        # Replace only specified modules
+        # Strategy 2: Replace only specific modules by path
+        # Note: This implementation assumes simple attribute access.
+        # For complex paths like "blocks[0].attn.qkv", a more robust traverser is usually needed.
         for target in target_modules:
+            # Basic logic to traverse dot-separated paths
             parts = target.split(".")
             current = module
             for part in parts[:-1]:
@@ -237,28 +254,23 @@ def replace_linear_with_lora(
 
 
 def freeze_lora_params(module: nn.Module) -> None:
-    """Freeze original weights in LoRA layers, keeping only adaptation parameters trainable."""
+    """
+    Freezes the 'weight' (base model) parameters in LoRA layers.
+    Ensures only the adapter matrices (A and B) are trained.
+    """
     for name, param in module.named_parameters():
         if "lora_" not in name and "weight" in name:
             param.requires_grad = False
 
 
 def unfreeze_lora_params(module: nn.Module) -> None:
-    """Unfreeze all parameters in LoRA layers."""
+    """Unfreezes everything (useful for debugging or full fine-tuning)."""
     for param in module.parameters():
         param.requires_grad = True
 
 
 def count_parameters(module: nn.Module, trainable_only: bool = True) -> int:
-    """Count the number of parameters in a module.
-
-    Args:
-        module: The module to count parameters for
-        trainable_only: If True, only count trainable parameters
-
-    Returns:
-        Number of parameters
-    """
+    """Utility to count total parameters."""
     if trainable_only:
         return sum(p.numel() for p in module.parameters() if p.requires_grad)
     else:
@@ -266,13 +278,9 @@ def count_parameters(module: nn.Module, trainable_only: bool = True) -> int:
 
 
 def count_lora_parameters(module: nn.Module) -> dict[str, int]:
-    """Count LoRA adaptation parameters.
-
-    Args:
-        module: The module containing LoRA layers
-
-    Returns:
-        Dictionary with "lora" and "non_lora" counts
+    """
+    Breaks down parameter counts into 'LoRA' vs 'Non-LoRA'.
+    Useful to verify that LoRA adds very few parameters (~1-2% of total).
     """
     lora_params = 0
     non_lora_params = 0

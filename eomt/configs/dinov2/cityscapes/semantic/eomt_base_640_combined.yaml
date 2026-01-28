@@ -1,19 +1,27 @@
 # =============================================================================
 # EoMT Base 640 Configuration: LoRA + ArcFace + CutPaste
 # =============================================================================
-# This config combines Low-Rank Adaptation (LoRA) for efficient training, 
-# ArcFace loss for better class separation, and CutPaste for anomaly detection.
+# This config defines the training pipeline for the EoMT model using:
+# 1. LoRA (Low-Rank Adaptation) for efficient fine-tuning.
+# 2. ArcFace Loss to enhance class separability (useful for anomaly detection).
+# 3. CutPaste augmentation to synthesize anomalies during training.
 # =============================================================================
 
 trainer:
+  # Maximum number of training epochs
   max_epochs: 10
+  # Hardware accelerator type (GPU)
   accelerator: gpu
+  # Number of GPUs to use
   devices: 1
+  # Mixed precision (16-bit) to reduce memory usage and speed up training
   precision: "16-mixed"
+  # Simulates a larger batch size by accumulating gradients over 4 steps before updating weights
   accumulate_grad_batches: 4
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
+      # Allow resuming runs with the same ID
       resume: allow
       project: "eomt"
       name: "cityscapes_eomt_base_640_combined"
@@ -21,61 +29,94 @@ trainer:
 model:
   class_path: training.lightning_module.LightningModule
   init_args:
+    # Path to the pre-trained checkpoint to initialize weights
     ckpt_path: "/teamspace/studios/this_studio/ckpt/epoch_106-step_19902_eomt.ckpt"
+    # Input image resolution [Height, Width]
     img_size: [640, 640]
-    num_classes: 20  # 19 Cityscapes + 1 anomaly
-    load_ckpt_class_head: false # Reinitialize to 20 classes + 1 no-object
+    # Total classes: 19 standard Cityscapes classes + 1 Anomaly class
+    num_classes: 20
+    # Set to false to re-initialize the classification head (since we changed class count)
+    load_ckpt_class_head: false 
     
-    # Custom ArcFace Loss
+    # Custom Loss Configuration: ArcFace for Segmentation
     criterion:
       class_path: training.mask_classification_loss_arcFace.MaskClassificationLossArcFace
       init_args:
+        # Number of points to sample for loss calculation
         num_points: 12544
+        # Ratio for oversampling hard examples
         oversample_ratio: 3.0
+        # Ratio for importance sampling
         importance_sample_ratio: 0.75
+        # Weight for the mask prediction loss
         mask_coefficient: 20.0
+        # Weight for the Dice loss (shape/overlap optimization)
         dice_coefficient: 1.0
+        # Weight for the classification loss
         class_coefficient: 2.0
+        # Number of semantic classes
         num_labels: 20
+        # Weight for the "no-object" (background) class
         no_object_coefficient: 0.1
+        # ArcFace Scale factor: Controls the radius of the hypersphere
         arcface_s: 30.0
+        # ArcFace Margin: Adds angular margin penalty to compact class clusters
         arcface_m: 0.50
 
     # Progressive Training Schedule
+    # Enables gradual annealing of the attention mask to stabilize training
     attn_mask_annealing_enabled: True
+    # Steps where annealing phases begin
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    # Steps where annealing phases end
     attn_mask_annealing_end_steps: [6634, 11609, 16585]
 
     network:
       class_path: models.eomt.EoMT
       init_args:
+        # Number of queries (proposals) used by the mask transformer
         num_q: 100
+        # Number of transformer decoder blocks
         num_blocks: 3
         num_classes: 20
         encoder:
           class_path: models.vit.ViT
           init_args:
+            # Backbone architecture: ViT Base with Patch size 14, registers, and DINOv2 weights
             backbone_name: vit_base_patch14_reg4_dinov2
         
-        # LoRA Configuration
+        # LoRA (Low-Rank Adaptation) Configuration
         lora_config:
           class_path: models.lora_integration.LoRAConfig
           init_args:
+            # Enable Parameter-Efficient Fine-Tuning (PEFT)
             enabled: true
+            # Rank of the low-rank update matrices (controls capacity/parameter count)
             rank: 8
+            # Scaling factor for LoRA weights
             lora_alpha: 16
+            # Dropout probability for LoRA layers
             lora_dropout: 0.1
-            target_modules: ["qkv", "proj", "fc1", "fc2"] # Target encoder blocks
+            # Specific transformer modules to apply LoRA adaptation to
+            target_modules: ["qkv", "proj", "fc1", "fc2"] 
+            # Freezes the main backbone parameters to save memory and prevent catastrophic forgetting
             freeze_base_model: true
 
 data:
   class_path: datasets.cityscapes_semantic_cutpaste.CityscapesSemanticCutPaste
   init_args:
+    # Path where the CutPaste augmented data is stored/generated
     path: "/teamspace/studios/this_studio/cityscapes_cutpaste"
+    # Original dataset path for reference
     original_cityscapes_path: "/teamspace/studios/this_studio/datasets"
+    # Number of subprocesses for data loading
     num_workers: 4
+    # Batch size per GPU
     batch_size: 2
+    # Resize dimensions for inputs
     img_size: [640, 640]
     num_classes: 20
+    # Enable random color augmentation
     color_jitter_enabled: true
+    # Random scale factors for data augmentation
     scale_range: [0.5, 2.0]

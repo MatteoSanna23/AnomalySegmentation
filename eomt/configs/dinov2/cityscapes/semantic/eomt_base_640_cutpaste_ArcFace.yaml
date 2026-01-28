@@ -1,0 +1,113 @@
+# =============================================================================
+# EoMT Base 640 Configuration: Cut-Paste Anomaly Segmentation with ArcFace Loss
+# =============================================================================
+# This config fine-tunes the EoMT model for anomaly detection using Cut-Paste.
+# Unlike the previous config, this one does NOT use LoRA, meaning it likely 
+# fine-tunes the full model or specific parts defined in the code.
+# =============================================================================
+
+trainer:
+  # Limits training to 3 epochs for a shorter fine-tuning cycle
+  max_epochs: 3
+  # Hardware accelerator type (GPU)
+  accelerator: gpu
+  # Number of GPUs to utilize
+  devices: 1
+  # Uses 16-bit mixed precision to reduce memory footprint and increase speed
+  precision: "16-mixed"
+  # Accumulates gradients over 4 batches to simulate a larger effective batch size
+  accumulate_grad_batches: 4
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      # Allows resuming a run if interrupted
+      resume: allow
+      # Weights & Biases project name
+      project: "eomt"
+      # Unique identifier for this specific training run
+      name: "cityscapes_semantic_eomt_base_640_cutpaste_ArcFace"
+
+model:
+  class_path: training.lightning_module.LightningModule
+  init_args:
+    # Path to the pre-trained weights to initialize the model (Transfer Learning)
+    ckpt_path: "/teamspace/studios/this_studio/ckpt/epoch_106-step_19902_eomt.ckpt"
+    
+    # Input image resolution [Height, Width]
+    img_size: [640, 640]
+    # Total classes: 19 standard Cityscapes classes + 1 Anomaly class
+    num_classes: 20 
+    
+    # Custom Loss Configuration: ArcFace for Segmentation
+    criterion:
+      class_path: training.mask_classification_loss_arcFace.MaskClassificationLossArcFace
+      init_args:
+        # Number of pixels sampled to calculate loss (saves computation vs full image)
+        num_points: 12544
+        # Ratio of hard examples (high error) to sample during training
+        oversample_ratio: 3.0
+        # Importance sampling ratio for point selection
+        importance_sample_ratio: 0.75
+        # Weight applied to the mask prediction loss
+        mask_coefficient: 20.0
+        # Weight applied to the Dice loss (optimizes shape overlap)
+        dice_coefficient: 1.0
+        # Weight applied to the class prediction loss
+        class_coefficient: 2.0
+        # Number of semantic classes (must match model settings)
+        num_labels: 20
+        # Weight for the "no-object" / background class predictions
+        no_object_coefficient: 0.1
+        # ArcFace Scale (s): Scales logits to amplify gradients
+        arcface_s: 30.0
+        # ArcFace Margin (m): Adds angular margin to enforce tighter class clusters
+        arcface_m: 0.50
+    
+    # Progressive Training Schedule:
+    # Gradually relaxes the attention mask to stabilize early training
+    attn_mask_annealing_enabled: True
+    # Steps where annealing phases begin
+    attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    # Steps where annealing phases end
+    attn_mask_annealing_end_steps: [6634, 11609, 16585]
+    
+    # CRITICAL: Set to false to discard the old classifier head.
+    # Necessary because we increased classes from 19 (original) to 20 (anomaly).
+    load_ckpt_class_head: false
+    
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        # Number of object queries (proposals) the transformer predicts
+        num_q: 100
+        # Number of decoder blocks in the transformer
+        num_blocks: 3
+        # Output classes matching the model definition
+        num_classes: 20
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            # Backbone: ViT Base, Patch 14, initialized with DINOv2 weights
+            backbone_name: vit_base_patch14_reg4_dinov2
+
+data:
+  class_path: datasets.cityscapes_semantic_cutpaste.CityscapesSemanticCutPaste
+  init_args:
+    # Path containing the Cut-Paste augmented data (synthetic anomalies)
+    path: "/teamspace/studios/this_studio/cityscapes_cutpaste"
+    
+    # Path to the clean, original Cityscapes data (for validation/reference)
+    original_cityscapes_path: "/teamspace/studios/this_studio/datasets"
+    
+    # Number of CPU subprocesses for data loading
+    num_workers: 4
+    # Batch size per GPU
+    batch_size: 2
+    # Resize dimensions for training inputs
+    img_size: [640, 640]
+    # Total classes (19 known + 1 anomaly)
+    num_classes: 20
+    # Enables random color perturbations to improve robustness
+    color_jitter_enabled: true
+    # Random scaling factors for data augmentation (0.5x to 2.0x)
+    scale_range: [0.5, 2.0]

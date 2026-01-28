@@ -12,11 +12,12 @@ from argparse import ArgumentParser
 import sys
 import math
 
-current_dir = os.path.dirname(os.path.abspath(__file__))  # get current directory
-project_root = os.path.dirname(current_dir)  # get parent directory
-eomt_package_dir = os.path.join(project_root, "eomt")  # path to eomt package
+# --- PATH SETUP ---
+# Dynamically add project root and 'eomt' package to sys.path to allow imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+eomt_package_dir = os.path.join(project_root, "eomt")
 
-# Add both paths to sys.path
 if project_root not in sys.path:
     sys.path.append(project_root)
 if eomt_package_dir not in sys.path:
@@ -25,6 +26,7 @@ if eomt_package_dir not in sys.path:
 from models.eomt import EoMT
 from models.vit import ViT
 
+# Import custom metrics for Out-of-Distribution (OOD) detection
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr, plot_barcode
 from sklearn.metrics import (
     roc_auc_score,
@@ -35,31 +37,32 @@ from sklearn.metrics import (
 )
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 
-# --- REPRODUCIBILITY ---
+# --- REPRODUCIBILITY SETUP ---
+# Set seeds to ensure deterministic results across runs
 seed = 42
 random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
 
-NUM_CLASSES = 19  # Cityscapes classes (ecxluding background/void for metrics ID)
+NUM_CLASSES = 20  # 19 Standard Cityscapes classes + 1 Learned Anomaly class
 
-# gpu training specific
+# Enable deterministic CuDNN algorithms for consistency
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
-# --- TRANSFORMS ---
+# --- DATA TRANSFORMS ---
 
 input_transform = Compose(
     [
         Resize((512, 1024), Image.BILINEAR),
         ToTensor(),
-        # Typical normalization for ViT/Mask2Former (ImageNet mean/std)
-        # IMPORTANTE: NON RIMUOVERE QUESTA NORMALIZZAZIONE PER EOMT/DINOv2
+        # Standard ImageNet normalization.
+        # CRITICAL: Do not remove this, as the pre-trained backbone (DINOv2/ViT) expects this distribution.
         Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ]
 )
 
-# resizing ground truth masks to match model output size
+# Resize Ground Truth masks using Nearest Neighbor to preserve integer class labels
 target_transform = Compose(
     [
         Resize((512, 1024), Image.NEAREST),
@@ -67,37 +70,45 @@ target_transform = Compose(
 )
 
 
-#! FUNCTION TO RESIZE POSITIONAL EMBEDDINGS AND MASK
+# =============================================================================
+# UTILITY: RESIZE POSITIONAL EMBEDDINGS
+# =============================================================================
 def resize_pos_embed(state_dict, model, target_img_size=(512, 1024)):
-    if "encoder.backbone.pos_embed" in state_dict:  # if positional embeddings exist
+    """
+    Resizes the positional embeddings in a checkpoint to match the current model's resolution.
+
+    Vision Transformers use fixed-size positional embeddings. If the inference resolution
+    differs from training (e.g., 512x1024 vs 224x224), we must interpolate the embeddings.
+    """
+
+    if "encoder.backbone.pos_embed" in state_dict:
         pos_embed_checkpoint = state_dict[
             "encoder.backbone.pos_embed"
-        ]  # [1, number_of_patches, embedding_dim]
-        embedding_dim = pos_embed_checkpoint.shape[-1]  # Embedding dimension (768)
+        ]  # Shape: [1, num_patches, embed_dim]
+        embedding_dim = pos_embed_checkpoint.shape[-1]
 
-        # Get model's current positional embeddings
+        # Get current model's embedding placeholder
         if hasattr(model.encoder.backbone, "pos_embed"):
             model_pos_embed = model.encoder.backbone.pos_embed
         else:
-            # Fallback (if model structure is different)
+            # Fallback calculation if attribute is missing
             model_pos_embed = torch.zeros(
                 1,
                 (target_img_size[0] // 16) * (target_img_size[1] // 16) + 1,
                 embedding_dim,
             )
 
-        num_patches_checkpoint = pos_embed_checkpoint.shape[
-            1
-        ]  # Number of patches in checkpoint (4096)
-        # here we have to resize from 4096 (64x64) to 2048 (32x64)
-        grid_size_chk = int(math.sqrt(num_patches_checkpoint))  # return 64
+        num_patches_checkpoint = pos_embed_checkpoint.shape[1]
 
-        # Reshape to [1, C, H, W]
+        # Calculate original grid size (assuming square training images, e.g., 64x64 patches)
+        grid_size_chk = int(math.sqrt(num_patches_checkpoint))
+
+        # 1. Reshape 1D sequence to 2D spatial grid [1, Dim, H, W] for interpolation
         pos_embed_reshaped = pos_embed_checkpoint.transpose(1, 2).reshape(
             1, embedding_dim, grid_size_chk, grid_size_chk
         )
 
-        # Compute new grid size based on target image size (512x1024) and patch size (16x16 -> 32x64)
+        # 2. Calculate target grid size based on patch size (16)
         patch_size = 16
         new_h, new_w = (
             target_img_size[0] // patch_size,
@@ -108,34 +119,31 @@ def resize_pos_embed(state_dict, model, target_img_size=(512, 1024)):
             f"Resizing pos_embed from {grid_size_chk}x{grid_size_chk} to {new_h}x{new_w}"
         )
 
-        # Interpolate to new size
+        # 3. Perform Bicubic Interpolation
         new_pos_embed = F.interpolate(
             pos_embed_reshaped, size=(new_h, new_w), mode="bicubic", align_corners=False
         )
 
-        # Reshape back to [1, number_of_patches, embedding_dim], bc ViT expects that
+        # 4. Flatten back to 1D sequence [1, N, Dim]
         new_pos_embed_spatial = new_pos_embed.flatten(2).transpose(1, 2)
 
-        # 4. Gestione CLS Token (Concatenazione)
-        # Se il modello vuole N+1 token (es. 2049) e noi ne abbiamo N (2048), aggiungiamo il CLS
+        # 5. Handle CLS Token
+        # If the model expects N+1 tokens (1 CLS + N Patches), we prepend the CLS token
+        # from the current model (or checkpoint if available).
         target_len = model_pos_embed.shape[1]
         if target_len == new_pos_embed_spatial.shape[1] + 1:
             print("Adding CLS token to pos_embed (concatenation)")
-            cls_pos_embed = model_pos_embed[
-                :, 0:1, :
-            ]  # Prendi il CLS random dal modello
-            # ? cls_pos_embed = model_pos_embed[:, 0:1, :].cpu()
+            cls_pos_embed = model_pos_embed[:, 0:1, :]
             new_pos_embed = torch.cat((cls_pos_embed, new_pos_embed_spatial), dim=1)
         else:
             new_pos_embed = new_pos_embed_spatial
 
         state_dict["encoder.backbone.pos_embed"] = new_pos_embed
 
-    # now we have to resize attn_mask_probs if needed
-    # if ckpt has saved 3 probs levels but model has 4 levels (due to different input size)
+    # Resize Attention Mask Probabilities (for annealing schedule) if levels differ
     if "attn_mask_probs" in state_dict:
-        amp = state_dict["attn_mask_probs"]  # [num_levels]
-        if amp.shape[0] != model.attn_mask_probs.shape[0]:  # if number of levels differ
+        amp = state_dict["attn_mask_probs"]
+        if amp.shape[0] != model.attn_mask_probs.shape[0]:
             print(
                 f"Adapting attn_mask_probs from {amp.shape} to {model.attn_mask_probs.shape}"
             )
@@ -146,52 +154,56 @@ def resize_pos_embed(state_dict, model, target_img_size=(512, 1024)):
                 align_corners=False,
             )
             state_dict["attn_mask_probs"] = new_amp.view(-1)
-            # after this, the state_dict will have the correct number of levels
+
     return state_dict
 
 
-#! FUNCTION TO GET PIXEL-WISE SCORES FROM MASK-BASED OUTPUTS
+# =============================================================================
+# UTILITY: COMPUTE PIXEL-WISE ANOMALY MAPS
+# =============================================================================
 def get_pixel_scores(pred_logits, pred_masks):
     """
-    Function to convert mask-based outputs to pixel-wise maps for metrics.
-    MODIFIED: Removed Normalization (restores RA-21), Added Thresholding (helps RO-21).
+    Converts mask transformer outputs (segment scores + binary masks) into dense pixel-wise maps.
+
+    Returns 3 types of maps:
+    1. Semantic Probabilities (Standardized on 19 classes)
+    2. Logits (Standardized on 19 classes)
+    3. Learned Anomaly Map (The specific contribution of our fine-tuning)
     """
-    # now we have pred_logits: (B, Q, K+1) and pred_masks: (B, Q, H, W)
 
-    # 1. Query probabilities (Softmax over classes)
-    query_probs = F.softmax(pred_logits, dim=-1)  # (B, Q, K+1)
-
-    # 2. Mask spatial probabilities (Sigmoid)
-    mask_probs = F.sigmoid(pred_masks)  # (B, Q, H, W)
-
-    # --- CORREZIONE: MASK THRESHOLDING ---
-    # Invece di normalizzare (che rompe RA-21), puliamo solo il rumore.
-    # Se una maschera è debole (< 0.5), la azzeriamo.
-    # Questo crea dei "buchi" dove non c'è nessuna classe nota -> RbA sale (Anomalie rilevate).
+    # Clean up binary mask predictions
+    mask_probs = F.sigmoid(pred_masks)
     mask_probs[mask_probs < 0.5] = 0.0
 
-    # Remove the last class (void/no-object) if present (assuming K=19+1)
-    valid_query_probs = query_probs[:, :, :NUM_CLASSES]  # (B, Q, 19)
-    valid_query_logits = pred_logits[:, :, :NUM_CLASSES]  # (B, Q, 19) - Raw logits
+    # --- PART A: STANDARDIZED METRICS (19 Classes) ---
+    # We purposefully ignore the 20th class here to compare fairly with standard methods
+    # (like MSP/MaxLogit) that only know about the 19 Cityscapes classes.
+    logits_19 = pred_logits[:, :, :19]
 
-    # 3. Calculate Pixel-wise Semantic Probabilities
-    # Weighted sum: sum_q ( P(c|q) * P(pixel|q) )
-    sem_probs = torch.einsum(
-        "bqc,bqhw->bchw", valid_query_probs, mask_probs
-    )  # (B, C, H, W) e.g., (1, 19, 512, 1024)
+    # Softmax over 19 classes ensures they sum to 1, treating 'anomaly' as uncertainty
+    probs_19 = F.softmax(logits_19, dim=-1)
 
-    # --- NO NORMALIZZAZIONE QUI ---
-    # Rimuoviamo la divisione per la somma.
-    # Se la somma delle probabilità è < 1 (es. c'è un buco), RbA (1-sum) sarà alto.
-    # Questo è il comportamento corretto per rilevare anomalie.
+    # Project segment scores to pixel space using Einstein summation
+    # b=batch, q=queries, c=classes, h=height, w=width
+    sem_probs_std = torch.einsum("bqc,bqhw->bchw", probs_19, mask_probs)
+    pixel_logits_std = torch.einsum("bqc,bqhw->bchw", logits_19, mask_probs)
 
-    # 4. Calculate Approximate Pixel-wise Logits (for MaxLogit)
-    # Weighted sum of logits : sum_q ( Logit(c|q) * P(pixel|q) )
-    pixel_logits = torch.einsum("bqc,bqhw->bchw", valid_query_logits, mask_probs)
+    # --- PART B: LEARNED ANOMALY METRIC (20 Classes) ---
+    # Here we use the full power of the model. We softmax over all 20 classes.
+    probs_20 = F.softmax(pred_logits, dim=-1)
 
-    return sem_probs, pixel_logits
+    # Extract specifically the 20th channel (Index 19) which represents "Anomaly"
+    anomaly_prob = probs_20[:, :, 19:20]
+
+    # Project the anomaly score to pixels
+    learned_anomaly_map = torch.einsum("bqc,bqhw->bchw", anomaly_prob, mask_probs)
+
+    return sem_probs_std, pixel_logits_std, learned_anomaly_map
 
 
+# =============================================================================
+# MAIN EVALUATION LOOP
+# =============================================================================
 def main():
     parser = ArgumentParser()
     parser.add_argument(
@@ -206,42 +218,43 @@ def main():
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
-    # Lists
+    # Lists to store scores for final metric calculation
     msp_list = []
     maxLogit_list = []
     entropy_list = []
     rba_list = []
-    ood_gts_list = []
+    learned_list = []  # New list for the learned anomaly score
+    ood_gts_list = []  # Ground Truth labels (0=In-Dist, 1=Anomaly)
 
+    # Initialize results file
     if not os.path.exists("results_eomt.txt"):
         open("results_eomt.txt", "w").close()
     file = open("results_eomt.txt", "a")
 
-    # Validate weights path early with a helpful message
     if not os.path.isfile(args.loadWeights):
         print(f"Weights file not found: {args.loadWeights}")
         sys.exit(1)
 
     print(f"Loading EoMT model weights from: {args.loadWeights}")
 
-    # Model Initialization
+    # --- MODEL INITIALIZATION ---
     encoder = ViT(
         img_size=(512, 1024),
         patch_size=16,
         backbone_name="vit_base_patch14_reg4_dinov2",
     )
-    # ? encoder = ViT(img_size=(512, 1024), patch_size=16, backbone_name='vit_base_patch16_224')
+    # Using 100 queries as per standard Mask2Former/EoMT config
     num_queries = 100
     model = EoMT(encoder=encoder, num_q=num_queries, num_classes=NUM_CLASSES)
 
     if not args.cpu:
         model = model.cuda()
 
-    # Load Custom Weights
+    # --- WEIGHT LOADING & CLEANING ---
     checkpoint = torch.load(args.loadWeights, map_location="cpu")
     state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
 
-    # Clean checkpoint keys (module./model./network.)
+    # Remove DDP/Lightning prefixes (module., model., network.) to match model keys
     new_state_dict = {}
     for k, v in state_dict.items():
         name = k
@@ -253,80 +266,88 @@ def main():
             name = name.replace("network.", "")
         new_state_dict[name] = v
 
-    # Resize positional embeddings and attn_mask_probs if needed, with resizing function
+    # Resize embeddings to match inference resolution
     new_state_dict = resize_pos_embed(
         new_state_dict, model, target_img_size=(512, 1024)
     )
+
+    # Load state dict (strict=False allows flexibility for minor mismatches)
     msg = model.load_state_dict(new_state_dict, strict=False)
     print(
         f"Weights loaded. Missing keys: {msg.missing_keys}, Unexpected keys: {msg.unexpected_keys}"
     )
+
     model.eval()
 
-    #! -- LOOP THROUGH IMAGES --
-    # Handle input list or glob pattern
+    # --- PROCESSING IMAGES ---
     input_files = []
-    for pattern in args.input:  # if multiple patterns are given...
+    for pattern in args.input:
         input_files.extend(glob.glob(os.path.expanduser(pattern)))
 
-    for path in input_files:  # for each image path
+    for path in input_files:
         filename = os.path.splitext(os.path.basename(path))[0]
         print(filename, end=" - ", flush=True)
 
-        # Prepare Input (apply transforms to get a (1, 3, H, W) tensor)
+        # 1. Preprocess Image
         pil_img = Image.open(path).convert("RGB")
         images = input_transform(pil_img).unsqueeze(0)
 
         if not args.cpu:
             images = images.cuda()
 
+        # 2. Inference
         with torch.no_grad():
-            # EoMT Forward
             outputs = model(images)
+
+            # Handle different output formats (tuple/list vs dict)
             if isinstance(outputs, (tuple, list)):
-                # Take the last level outputs
-                # outputs[0]: pred_masks, outputs[1]: pred_logits
+                # EoMT usually returns a list of outputs for each decoder layer; take the last one
                 pred_masks = outputs[0][-1]
                 pred_logits = outputs[1][-1]
             elif isinstance(outputs, dict):
                 pred_masks = outputs["pred_masks"]
                 pred_logits = outputs["pred_logits"]
             else:
-                raise TypeError(f"Formato output inatteso: {type(outputs)}")
+                raise TypeError(f"Unexpected output format: {type(outputs)}")
 
-            # Upsample masks to evaluation resolution (512x1024)
+            # Upsample low-res mask predictions to target resolution
             pred_masks = F.interpolate(
                 pred_masks, size=(512, 1024), mode="bilinear", align_corners=False
             )
 
-            # Obtain pixel-wise maps
-            sem_probs, pixel_logits = get_pixel_scores(pred_logits, pred_masks)
+            # 3. Compute Anomaly Maps
+            sem_probs_std, pixel_logits_std, learned_map = get_pixel_scores(
+                pred_logits, pred_masks
+            )
 
-            # Convert to numpy (remove batch dim) beacause we have batch size 1
-            sem_probs_np = sem_probs.squeeze(0).cpu().numpy()  # (19, 512, 1024)
-            pixel_logits_np = pixel_logits.squeeze(0).cpu().numpy()  # (19, 512, 1024)
+            # Squeeze batch dimension for numpy conversion
+            sem_probs_np = sem_probs_std.squeeze(0).cpu().numpy()
+            pixel_logits_np = pixel_logits_std.squeeze(0).cpu().numpy()
+            learned_np = learned_map.squeeze(0).cpu().numpy()
 
-            # -- COMPUTATION 1 : MSP --
-            msp_score = 1 - np.max(
-                sem_probs_np, axis=0
-            )  # 1 - max(Known Class Probabilities)
+            # --- METRIC 1: MSP (Maximum Softmax Probability) ---
+            # Anomaly Score = 1 - Max probability of any known class
+            msp_score = 1 - np.max(sem_probs_np, axis=0)
 
-            # -- COMPUTATION 2 : MaxLogit --
-            maxLogit_score = -np.max(
-                pixel_logits_np, axis=0
-            )  # - max(Known Class Logits)
+            # --- METRIC 2: MaxLogit ---
+            # Anomaly Score = - Max logit of any known class (Logits are unnormalized)
+            maxLogit_score = -np.max(pixel_logits_np, axis=0)
 
-            # -- COMPUTATION 3 : Entropy --
+            # --- METRIC 3: Entropy ---
+            # Measures uncertainty of the distribution over known classes
             entropy_score = -np.sum(sem_probs_np * np.log(sem_probs_np + 1e-8), axis=0)
 
-            # -- COMPUTATION 4 : RbA (Rejected by All) --
-            # If all class probabilities are low, sum will be low, and RbA will be high.
-            rba_score = 1 - np.sum(
-                sem_probs_np, axis=0
-            )  # RbA = 1 - Sum(Probabilities of Known Classes)
+            # --- METRIC 4: RbA (Residual-based Anomaly) ---
+            # Usually 1 - sum(probs), but since we renormalized, this might be low. kept for legacy.
+            rba_score = 1 - np.sum(sem_probs_np, axis=0)
 
-        #! Management of ground truth (Same as evalAnomaly.py)
+            # --- METRIC 5: Learned Anomaly ---
+            # Direct probability of the anomaly class (Class Index 19)
+            learned_score = learned_np[0, :, :]
+
+        # 4. Load Ground Truth (GT) and Normalize Labels
         pathGT = path.replace("images", "labels_masks")
+        # Handle dataset-specific extensions
         if "RoadObsticle21" in pathGT:
             pathGT = pathGT.replace("webp", "png")
         if "fs_static" in pathGT:
@@ -338,18 +359,21 @@ def main():
         mask = target_transform(mask)
         ood_gts = np.array(mask)
 
-        # Mapping specific dataset labels to binary OOD (1) / ID (0)
+        # Normalize diverse dataset labels to Binary: 0 = In-Distribution, 1 = Anomaly
         if "RoadAnomaly" in pathGT:
             ood_gts = np.where((ood_gts == 2), 1, ood_gts)
         if "LostAndFound" in pathGT:
-            ood_gts = np.where((ood_gts == 0), 255, ood_gts)
-            ood_gts = np.where((ood_gts == 1), 0, ood_gts)
-            ood_gts = np.where((ood_gts > 1) & (ood_gts < 201), 1, ood_gts)
+            ood_gts = np.where((ood_gts == 0), 255, ood_gts)  # Ignore background
+            ood_gts = np.where((ood_gts == 1), 0, ood_gts)  # Road -> ID
+            ood_gts = np.where(
+                (ood_gts > 1) & (ood_gts < 201), 1, ood_gts
+            )  # Objects -> OOD
         if "Streethazard" in pathGT:
             ood_gts = np.where((ood_gts == 14), 255, ood_gts)
             ood_gts = np.where((ood_gts < 20), 0, ood_gts)
             ood_gts = np.where((ood_gts == 255), 1, ood_gts)
 
+        # Skip images with no valid anomaly pixels if necessary
         if 1 not in np.unique(ood_gts):
             continue
         else:
@@ -358,22 +382,18 @@ def main():
             maxLogit_list.append(maxLogit_score)
             entropy_list.append(entropy_score)
             rba_list.append(rba_score)
+            learned_list.append(learned_score)
 
-        del (
-            outputs,
-            sem_probs,
-            msp_score,
-            maxLogit_score,
-            entropy_score,
-            rba_score,
-            ood_gts,
-        )
+        # Clear memory
+        del outputs, sem_probs_std, msp_score, maxLogit_score, learned_score, ood_gts
         torch.cuda.empty_cache()
 
     file.write("\n")
     print("\n")
 
+    # --- FINAL METRIC EVALUATION HELPER ---
     def evaluate_metric(score_list, gt_list, method_name):
+        """Calculates AUPRC and FPR@95 using flattened arrays."""
         if len(score_list) == 0:
             print(f"No data to evaluate for {method_name}.")
             return
@@ -381,18 +401,21 @@ def main():
         ood_gts = np.array(gt_list)
         anomaly_scores = np.array(score_list)
 
+        # Flatten arrays based on mask (0 vs 1)
         ood_mask = ood_gts == 1
         ind_mask = ood_gts == 0
 
         ood_out = anomaly_scores[ood_mask]
         ind_out = anomaly_scores[ind_mask]
 
+        # Create binary labels for sklearn
         ood_label = np.ones(len(ood_out))
         ind_label = np.zeros(len(ind_out))
 
         val_out = np.concatenate((ind_out, ood_out))
         val_label = np.concatenate((ind_label, ood_label))
 
+        # Calculate metrics
         prc_auc = average_precision_score(val_label, val_out)
         fpr = fpr_at_95_tpr(val_out, val_label)
 
@@ -402,11 +425,16 @@ def main():
         print(res_str)
         file.write(res_str + "\n")
 
-    # FINAL EVALUATION
+    # --- PRINT RESULTS ---
+    print("--- STANDARD METRICS (Normalized on 19 Classes) ---")
     evaluate_metric(msp_list, ood_gts_list, "MSP")
     evaluate_metric(maxLogit_list, ood_gts_list, "MaxLogit")
     evaluate_metric(entropy_list, ood_gts_list, "Entropy")
     evaluate_metric(rba_list, ood_gts_list, "RbA")
+
+    print("--- NEW METRIC (Using Learned Anomaly Class) ---")
+
+    evaluate_metric(learned_list, ood_gts_list, "Learned_Anomaly")
 
     file.close()
 

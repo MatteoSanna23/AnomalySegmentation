@@ -1,34 +1,14 @@
 """
 Offline Cut-Paste Dataset Generator
 ====================================
+This script creates a permanent, pre-augmented version of the Cityscapes dataset.
+Instead of pasting objects "on the fly" during training (which slows down the GPU),
+we generate a fixed dataset where anomalies are already pasted into the images.
 
-This script generates a pre-augmented version of the Cityscapes dataset
-with Cut-Paste anomalies already applied and saved to disk.
-
-Why Offline Generation?
-    - Faster training: no augmentation overhead during training
-    - Consistent augmentation: same augmented images across runs
-    - Easy inspection: can visually verify augmented images before training
-    - Storage tradeoff: requires more disk space but faster iteration
-
-Output Structure:
-    output_path/
-    ├── leftImg8bit/
-    │   └── train/
-    │       └── {city}/
-    │           └── {city}_XXXXXX_YYYYYY_leftImg8bit.png
-    ├── gtFine/
-    │   └── train/
-    │       └── {city}/
-    │           └── {city}_XXXXXX_YYYYYY_gtFine_labelIds.png
-    └── metadata_train.json  # Statistics and file list
-
-Usage:
-    python generate_cutpaste_dataset.py \\
-        --cityscapes_path /path/to/cityscapes \\
-        --coco_ood_path /path/to/coco_ood \\
-        --output_path /path/to/output \\
-        --cutpaste_ratio 0.5
+Key benefits:
+1. Faster Training Loop (removes CPU bottleneck during training).
+2. Visual Debugging (allows inspection of generated anomalies before training).
+3. Reproducibility (guarantees the same augmented data across different runs).
 """
 
 import os
@@ -51,14 +31,13 @@ import cv2
 
 class CutPasteGenerator:
     """
-    Generates augmented images with OOD objects pasted onto them.
-
-    This is a simplified version of CutPasteAugmentation optimized for
-    offline batch processing. Loads COCO OOD objects and pastes them
-    onto Cityscapes images with configurable blending.
+    Handles the logic of selecting an anomaly object, resizing it,
+    and blending it seamlessly into a background image using alpha compositing.
     """
 
-    ANOMALY_LABEL_ID = 254  # Pixel value for anomaly regions in masks
+    # The specific pixel value (class ID) assigned to the anomaly mask.
+    # The loss function will look for this ID to calculate anomaly detection performance.
+    ANOMALY_LABEL_ID = 254
 
     def __init__(
         self,
@@ -71,15 +50,15 @@ class CutPasteGenerator:
         seed: int = 42,
     ):
         """
-        Initialize the Cut-Paste generator.
+        Initialize the generator configuration.
 
         Args:
-            coco_ood_path: Path to downloaded COCO OOD subset.
-            min_objects: Minimum number of objects to paste per image.
-            max_objects: Maximum number of objects to paste per image.
-            scale_range: Random scale factor range (min, max).
-            blend_mode: Blending mode ("paste" or "alpha_feather").
-            feather_radius: Gaussian blur sigma for feathered edges.
+            coco_ood_path: Directory containing the OOD objects (images/masks/metadata).
+            min_objects: Minimum number of anomalies to paste per image.
+            max_objects: Maximum number of anomalies to paste per image.
+            scale_range: Tuple (min, max) for random resizing of objects.
+            blend_mode: 'alpha_feather' for soft edges, 'paste' for hard edges.
+            feather_radius: Gaussian blur radius for edge softening (pixels).
             seed: Random seed for reproducibility.
         """
         self.coco_ood_path = Path(coco_ood_path)
@@ -89,11 +68,11 @@ class CutPasteGenerator:
         self.blend_mode = blend_mode
         self.feather_radius = feather_radius
 
-        # Set random seeds for reproducibility
+        # Ensure deterministic randomness for reproducible datasets
         random.seed(seed)
         np.random.seed(seed)
 
-        # Load COCO OOD metadata (list of available objects)
+        # Load the index of available anomaly objects
         metadata_path = self.coco_ood_path / "metadata.json"
         with open(metadata_path, "r") as f:
             self.metadata = json.load(f)
@@ -103,23 +82,20 @@ class CutPasteGenerator:
 
     def _load_object(self, obj_info: dict) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Load image and mask for a specific OOD object.
-
-        Args:
-            obj_info: Dictionary with object metadata (filename, bbox).
+        Reads the image file and mask file for a specific anomaly object.
 
         Returns:
-            tuple: (cropped_image, cropped_mask) as numpy arrays.
+            Tuple of (RGB image array, Binary mask array) cropped to the object's bbox.
         """
-        # Load full image containing the object
+        # Load the RGB image of the object (e.g., a bear)
         img_path = self.coco_ood_path / "images" / obj_info["image_filename"]
         img = np.array(Image.open(img_path).convert("RGB"))
 
-        # Load corresponding binary mask
+        # Load the binary mask (shape of the object)
         mask_path = self.coco_ood_path / "masks" / obj_info["mask_filename"]
         mask = np.array(Image.open(mask_path).convert("L"))
 
-        # Crop to bounding box to get just the object
+        # Crop the arrays to the bounding box to remove empty space
         x1, y1, x2, y2 = obj_info["bbox"]
         return img[y1:y2, x1:x2], mask[y1:y2, x1:x2]
 
@@ -131,29 +107,21 @@ class CutPasteGenerator:
         target_w: int,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Resize object with random scale, capped to max 40% of image size.
-
-        Args:
-            obj_crop: Object image crop [H, W, 3].
-            mask_crop: Object mask crop [H, W].
-            target_h: Target image height (to compute max size).
-            target_w: Target image width (to compute max size).
-
-        Returns:
-            tuple: (scaled_image, scaled_mask).
+        Resizes the object so it fits naturally in the scene.
+        Enforces a hard limit: object cannot be larger than 40% of the scene dimensions.
         """
         h, w = obj_crop.shape[:2]
-        scale = random.uniform(*self.scale_range)  # Random scale factor
+        scale = random.uniform(*self.scale_range)
 
-        # Cap maximum size to 40% of target image dimensions
+        # Cap maximum size to avoid the object covering the entire image
         max_h = int(target_h * 0.4)
         max_w = int(target_w * 0.4)
 
-        # Calculate new dimensions with scale
+        # Calculate new dimensions
         new_h = int(h * scale)
         new_w = int(w * scale)
 
-        # Clamp to maximum allowed size (preserve aspect ratio)
+        # Logic to preserve aspect ratio while respecting max dimensions
         if new_h > max_h:
             ratio = max_h / new_h
             new_h, new_w = max_h, int(new_w * ratio)
@@ -161,14 +129,15 @@ class CutPasteGenerator:
             ratio = max_w / new_w
             new_w, new_h = max_w, int(new_h * ratio)
 
-        # Ensure minimum size of 32x32 pixels
+        # Prevent objects from becoming too tiny (less than 32px)
         new_h = max(new_h, 32)
         new_w = max(new_w, 32)
 
-        # Resize image (bilinear) and mask (nearest neighbor)
+        # Resize the RGB image using linear interpolation (smoother)
         obj_scaled = cv2.resize(
             obj_crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR
         )
+        # Resize the mask using nearest neighbor (keeps edges sharp)
         mask_scaled = cv2.resize(
             mask_crop, (new_w, new_h), interpolation=cv2.INTER_NEAREST
         )
@@ -177,29 +146,25 @@ class CutPasteGenerator:
 
     def _create_feathered_mask(self, mask: np.ndarray) -> np.ndarray:
         """
-        Create mask with soft feathered edges using erode + blur technique.
+        Creates a 'soft' transparency mask to blend edges smoothly.
 
-        This prevents the model from learning to detect anomalies based on
-        artificial hard edges from the pasting process.
-
-        Args:
-            mask: Binary mask [H, W] with values 0-255.
-
-        Returns:
-            np.ndarray: Feathered mask [H, W] with float values 0-1.
+        Why? If we simply paste an object, the edges are pixel-perfect and sharp.
+        A neural network might learn to detect "sharp edges" instead of the object itself.
+        Feathering blurs the edge to make the blending look more natural.
         """
-        # Normalize mask to float [0, 1]
+        # Convert 0-255 integer mask to 0.0-1.0 float
         mask_float = mask.astype(np.float32) / 255.0
 
         if self.feather_radius > 0:
-            # Step 1: Erode mask to create solid core
+            # 1. Shrink the mask slightly (erode) to define the solid core
             kernel = np.ones((3, 3), np.uint8)
             eroded = cv2.erode(
                 (mask_float * 255).astype(np.uint8), kernel, iterations=2
             )
-            # Step 2: Blur original mask for soft edges
+            # 2. Blur the original mask to create the soft edge
             blurred = cv2.GaussianBlur(mask_float, (0, 0), self.feather_radius)
-            # Step 3: Combine - solid core with soft transition
+
+            # 3. Combine: Keep the core solid, use the blur for the edges
             mask_float = np.maximum(eroded.astype(np.float32) / 255.0, blurred)
 
         return mask_float
@@ -210,31 +175,25 @@ class CutPasteGenerator:
         target_mask: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Apply Cut-Paste augmentation to an image.
+        The main augmentation pipeline.
 
-        Randomly selects OOD objects and pastes them at random locations.
-        Updates the segmentation mask to mark pasted regions as anomaly.
-
-        Args:
-            image: RGB image as numpy array [H, W, 3].
-            target_mask: Segmentation mask as numpy array [H, W].
-
-        Returns:
-            tuple: (modified_image, modified_mask) with anomalies added.
+        1. Pick N random OOD objects.
+        2. Resize them.
+        3. Pick random (x,y) coordinates on the background.
+        4. Blend the object into the image using the alpha mask.
+        5. Update the ground truth label to '254' at that location.
         """
-        img = image.copy()  # Don't modify original
+        img = image.copy()  # Protect original data
         mask = target_mask.copy()
 
-        # Randomly select number of objects to paste
         num_objects = random.randint(self.min_objects, self.max_objects)
         selected = random.sample(self.objects, min(num_objects, len(self.objects)))
 
         img_h, img_w = img.shape[:2]
 
-        # Paste each selected object
         for obj_info in selected:
             try:
-                # Load and scale the object
+                # Prepare object
                 obj_crop, obj_mask = self._load_object(obj_info)
                 obj_crop, obj_mask = self._scale_object(
                     obj_crop, obj_mask, img_h, img_w
@@ -242,42 +201,43 @@ class CutPasteGenerator:
 
                 obj_h, obj_w = obj_crop.shape[:2]
 
-                # Choose random position for pasting
+                # Random positioning
                 pos_y = random.randint(0, max(0, img_h - obj_h))
                 pos_x = random.randint(0, max(0, img_w - obj_w))
 
-                # Calculate valid region (handle edge cases)
+                # Define regions (Crop coordinates)
                 y1, x1 = max(0, pos_y), max(0, pos_x)
                 y2, x2 = min(img_h, pos_y + obj_h), min(img_w, pos_x + obj_w)
 
-                # Calculate corresponding region in object crop
+                # Coordinate math to handle if object goes partially off-screen
                 obj_y1, obj_x1 = y1 - pos_y, x1 - pos_x
                 obj_y2, obj_x2 = obj_y1 + (y2 - y1), obj_x1 + (x2 - x1)
 
-                # Extract regions for blending
+                # Get the slices
                 obj_region = obj_crop[obj_y1:obj_y2, obj_x1:obj_x2]
                 mask_region = obj_mask[obj_y1:obj_y2, obj_x1:obj_x2]
                 img_region = img[y1:y2, x1:x2]
 
-                # Create alpha mask for blending
+                # Generate Alpha Mask (Soft edges)
                 if self.blend_mode == "alpha_feather":
                     alpha = self._create_feathered_mask(mask_region)[..., np.newaxis]
                 else:
-                    # Simple binary mask (hard edges)
                     alpha = (mask_region > 127).astype(np.float32)[..., np.newaxis]
 
-                # Alpha blend: output = obj * alpha + background * (1 - alpha)
+                # Perform Alpha Blending:
+                # Result = (Object * Alpha) + (Background * (1 - Alpha))
                 blended = (obj_region * alpha + img_region * (1 - alpha)).astype(
                     np.uint8
                 )
                 img[y1:y2, x1:x2] = blended
 
-                # Update segmentation mask: mark object pixels as anomaly
+                # Update the Semantic Mask (Ground Truth)
+                # Any pixel belonging to the object is now Class 254 (Anomaly)
                 binary_mask = mask_region > 127
                 mask[y1:y2, x1:x2][binary_mask] = self.ANOMALY_LABEL_ID
 
             except Exception as e:
-                continue  # Skip failed objects, continue with others
+                continue
 
         return img, mask
 
@@ -300,37 +260,22 @@ def generate_dataset(
     seed: int = 42,
 ):
     """
-    Generate Cityscapes dataset with pre-applied Cut-Paste augmentation.
-
-    Reads from Cityscapes zip files, applies Cut-Paste to a subset of images,
-    and saves the augmented dataset to disk in Cityscapes-compatible format.
-
-    Args:
-        cityscapes_path: Path to folder containing Cityscapes zip files.
-        coco_ood_path: Path to downloaded COCO OOD subset.
-        output_path: Output directory for augmented dataset.
-        split: Dataset split to process ("train" or "val").
-        cutpaste_ratio: Fraction of images to augment (0.0 to 1.0).
-        min_objects: Minimum objects to paste per augmented image.
-        max_objects: Maximum objects to paste per augmented image.
-        scale_range: Random scale factor range for objects.
-        blend_mode: Blending mode for pasting.
-        seed: Random seed for reproducibility.
+    Orchestrates the batch processing.
+    It reads raw Cityscapes ZIPs, augments 50% (default) of them,
+    and saves the new dataset structure to disk.
     """
-    # Set seeds for reproducibility
     random.seed(seed)
     np.random.seed(seed)
 
     cityscapes_path = Path(cityscapes_path)
     output_path = Path(output_path)
 
-    # Create output directory structure (mirrors Cityscapes format)
+    # Set up output directories
     output_images = output_path / "leftImg8bit" / split
     output_masks = output_path / "gtFine" / split
     output_images.mkdir(parents=True, exist_ok=True)
     output_masks.mkdir(parents=True, exist_ok=True)
 
-    # Initialize Cut-Paste generator
     generator = CutPasteGenerator(
         coco_ood_path=coco_ood_path,
         min_objects=min_objects,
@@ -340,7 +285,7 @@ def generate_dataset(
         seed=seed,
     )
 
-    # Open Cityscapes zip files
+    # Directly read ZIP files to avoid extracting the huge Cityscapes dataset manually
     img_zip_path = cityscapes_path / "leftImg8bit_trainvaltest.zip"
     mask_zip_path = cityscapes_path / "gtFine_trainvaltest.zip"
 
@@ -348,7 +293,7 @@ def generate_dataset(
     img_zip = zipfile.ZipFile(img_zip_path, "r")
     mask_zip = zipfile.ZipFile(mask_zip_path, "r")
 
-    # Find all images in the specified split
+    # Filter for the correct split (train/val)
     img_prefix = f"leftImg8bit/{split}/"
     img_files = [
         f
@@ -358,53 +303,47 @@ def generate_dataset(
 
     print(f"Found {len(img_files)} images in {split}")
 
-    # Track statistics
     stats = {"total": 0, "with_cutpaste": 0, "original": 0}
     metadata = []
 
-    # Process each image
     for img_path in tqdm(img_files, desc=f"Generating {split}"):
-        # Parse path: leftImg8bit/train/aachen/aachen_000000_000019_leftImg8bit.png
+        # Extract city name and filename from path
         parts = img_path.split("/")
-        city = parts[2]  # e.g., "aachen"
-        filename = parts[3]  # e.g., "aachen_000000_000019_leftImg8bit.png"
+        city = parts[2]
+        filename = parts[3]
         base_name = filename.replace("_leftImg8bit.png", "")
-
-        # Construct corresponding mask path
         mask_path = f"gtFine/{split}/{city}/{base_name}_gtFine_labelIds.png"
 
-        # Create city subdirectory in output
+        # Create subfolders for the city
         (output_images / city).mkdir(exist_ok=True)
         (output_masks / city).mkdir(exist_ok=True)
 
-        # Load image and mask from zip
+        # Read binary data from ZIP
         with img_zip.open(img_path) as f:
             img = np.array(Image.open(f).convert("RGB"))
 
         with mask_zip.open(mask_path) as f:
             mask = np.array(Image.open(f))
 
-        # Randomly decide whether to apply Cut-Paste
+        # Decide whether to apply Cut-Paste augmentation
         apply_cutpaste = random.random() < cutpaste_ratio
 
         if apply_cutpaste:
             img_out, mask_out = generator.apply_cutpaste(img, mask)
             stats["with_cutpaste"] += 1
         else:
-            # Keep original image (no augmentation)
             img_out, mask_out = img, mask
             stats["original"] += 1
 
         stats["total"] += 1
 
-        # Save augmented/original image and mask
+        # Save results to the new output folder
         out_img_path = output_images / city / filename
         out_mask_path = output_masks / city / f"{base_name}_gtFine_labelIds.png"
 
         Image.fromarray(img_out).save(out_img_path)
         Image.fromarray(mask_out).save(out_mask_path)
 
-        # Record metadata for this image
         metadata.append(
             {
                 "image": str(out_img_path.relative_to(output_path)),
@@ -414,11 +353,10 @@ def generate_dataset(
             }
         )
 
-    # Close zip files
     img_zip.close()
     mask_zip.close()
 
-    # Save metadata JSON with statistics and file list
+    # Save a JSON manifest of what we created
     meta_path = output_path / f"metadata_{split}.json"
     with open(meta_path, "w") as f:
         json.dump(
@@ -433,7 +371,6 @@ def generate_dataset(
             indent=2,
         )
 
-    # Print summary
     print(f"\nDataset generated in {output_path}")
     print(f"  Total images: {stats['total']}")
     print(f"  With Cut-Paste: {stats['with_cutpaste']}")
@@ -443,7 +380,6 @@ def generate_dataset(
 # =============================================================================
 # COMMAND LINE INTERFACE
 # =============================================================================
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
