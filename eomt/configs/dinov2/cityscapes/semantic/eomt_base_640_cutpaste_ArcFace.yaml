@@ -62,6 +62,9 @@ model:
         arcface_s: 30.0
         # ArcFace Margin (m): Adds angular margin to enforce tighter class clusters
         arcface_m: 0.50
+        # Outlier loss parameters for anomaly class (20)
+        outlier_temperature: 1.0
+        outlier_loss_weight: 2.0  # Increased weight to emphasize outlier separation
     
     # Progressive Training Schedule:
     # Gradually relaxes the attention mask to stabilize early training

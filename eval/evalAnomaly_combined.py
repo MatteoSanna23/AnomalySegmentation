@@ -213,7 +213,7 @@ def load_combined_model(checkpoint_path, device):
     # and only training low-rank matrices in specific layers (qkv, proj, fc).
     lora_config = LoRAConfig(
         enabled=True,
-        rank=16,
+        rank=8,
         lora_alpha=16,
         target_modules=["qkv", "proj", "fc1", "fc2"],
         freeze_base_model=True,

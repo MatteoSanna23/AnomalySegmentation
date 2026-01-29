@@ -126,10 +126,12 @@ class MaskClassificationLossArcFace(Mask2FormerLoss):
             elif "dice" in loss_key:
                 weighted_loss = loss * self.dice_coefficient
             elif "cross_entropy" in loss_key:
+                # cross_entropy already includes the weighted RbA loss
                 weighted_loss = loss * self.class_coefficient
             elif "rba" in loss_key:
-                # RbA loss is already weighted by outlier_loss_weight in loss_labels
-                weighted_loss = loss * self.class_coefficient
+                # RbA loss is already included in cross_entropy, just log it separately
+                # DO NOT add it again to avoid double counting
+                weighted_loss = torch.tensor(0.0, device=loss.device)
             else:
                 raise ValueError(f"Unknown loss key: {loss_key}")
 
@@ -204,12 +206,22 @@ class MaskClassificationLossArcFace(Mask2FormerLoss):
                     # Only apply one-hot for in-distribution classes (0-19)
                     one_hot[batch_idx[i], query_idx[i], label] = 1.0
 
-        # 5. Compute ArcFace: cos(theta + m)a
+        # 5. Compute ArcFace: cos(theta + m) ONLY for positions with inlier targets
         sine = torch.sqrt(1.0 - torch.pow(cosine, 2))
         phi = cosine * self.cos_m - sine * self.sin_m
 
+        # Apply ArcFace margin ONLY to inlier positions
+        # For outlier positions, use cosine without margin
         if self.arcface_m > 0.0:
-            output_inlier = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+            # Create a mask for inlier positions (expand is_inlier to match cosine shape)
+            is_inlier_expanded = is_inlier.unsqueeze(-1).expand_as(cosine)
+
+            # Apply phi (ArcFace) to one-hot targets of inliers
+            # Apply cosine (no margin) to everything else
+            output_arcface = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+
+            # For outlier positions, replace with pure cosine (no ArcFace margin)
+            output_inlier = torch.where(is_inlier_expanded, output_arcface, cosine)
         else:
             output_inlier = cosine
 
